@@ -1,6 +1,7 @@
 #include "LinearLayer.cu"
 #include "ActivationLayer.cu"
 #include "CheckpointLayer.cu"
+#include "LayerNorm.cu"
 
 #ifndef MLP_LAYER
 #define MLP_LAYER
@@ -49,6 +50,9 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
             auto checkpointPtr = std::dynamic_pointer_cast<CheckpointLayer<DType>>(modelLayers[l]);
             if (checkpointPtr == nullptr) continue;
 
+            /**
+             * @brief Execute activations operation.
+             */
             std::vector<Tensor<DType>> activations(1, checkpointPtr->activationStorage);
             for (int layerIdx = l + 1; layerIdx < lastLayerIdx; layerIdx++) {
                 activations.push_back(modelLayers[layerIdx]->forward(activations.back()));
@@ -71,7 +75,17 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
     }
 
     /**
+     * @brief Resets all parameter gradients in every sub-layer to zero.
+     */
+    void zeroGrad() override {
+        for (auto& layer : modelLayers) {
+            layer->zeroGrad();
+        }
+    }
+
+    /**
      * @brief Propagates SGD update to every sub-layer.
+     * Each layer updates its parameters in-place using its own gradients.
      * @param lr Learning rate.
      */
     void sgdUpdate(DType lr) override {
@@ -94,6 +108,21 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
             }
         }
         return params;
+    }
+
+    /**
+     * @brief Sets parameters for all sub-layers from a dictionary. 
+     * Only keys matching the expected "layer_N.param" format are used; others are ignored.
+     */
+    void setParameters(const std::map<std::string, Tensor<DType>>& params) override {
+        for (size_t i = 0; i < modelLayers.size(); i++) {
+            std::string prefix = "layer_" + std::to_string(i) + ".";
+            std::map<std::string, Tensor<DType>> layerParams;
+            for (const auto& [name, tensor] : params) {
+                if (name.find(prefix) == 0) layerParams[name.substr(prefix.size())] = tensor;
+            }
+            if (!layerParams.empty()) modelLayers[i]->setParameters(layerParams);
+        }
     }
 
     /**

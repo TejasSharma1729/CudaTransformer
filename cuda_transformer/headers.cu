@@ -1,6 +1,7 @@
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <fstream>
 #include <limits>
@@ -88,6 +89,9 @@ struct Shape8 {
      * @return std::vector<size_t> Output extracted array replicating current bounds geometry.
      */
     __host__ std::vector<size_t> toVector() const {
+        /**
+         * @brief Execute v operation.
+         */
         std::vector<size_t> v(nDim);
         for (size_t i = 0; i < nDim; ++i) v[i] = dims[i];
         return v;
@@ -133,6 +137,9 @@ inline const IndexRange _ = IndexRange();
  * @param value The scalar value to fill the tensor with uniformly.
  */
 template <typename DType>
+/**
+ * @brief Execute fillKernel operation.
+ */
 __global__ void fillKernel(DType *data, size_t size, DType value) {
     size_t idx = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -148,6 +155,9 @@ __global__ void fillKernel(DType *data, size_t size, DType value) {
  * @param size  Total size of the tensor memory to fill.
  */
 template <typename DType, typename CastType>
+/**
+ * @brief Execute castKernel operation.
+ */
 __global__ void castKernel(const DType *oldData, CastType *newData, size_t size) {
     size_t idx = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -216,6 +226,9 @@ std::shared_ptr<DType[]> cudaCloneShared(std::shared_ptr<DType[]> pointerToClone
  * @param size   Total number of elements.
  */
 template <typename DType>
+/**
+ * @brief Execute sgdUpdateKernel operation.
+ */
 __global__ void sgdUpdateKernel(DType *params, const DType *grads, DType lr, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -232,6 +245,9 @@ __global__ void sgdUpdateKernel(DType *params, const DType *grads, DType lr, int
  * @param size   Number of elements.
  */
 template <typename DType>
+/**
+ * @brief Execute runSgdUpdate operation.
+ */
 void runSgdUpdate(std::shared_ptr<DType[]> params, std::shared_ptr<DType[]> grads, DType lr, int size) {
     if (params == nullptr || grads == nullptr || size == 0) return;
     int blockSize = 256;

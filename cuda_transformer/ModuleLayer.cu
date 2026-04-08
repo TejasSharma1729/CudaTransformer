@@ -54,6 +54,12 @@ template <typename DType = float> struct Layer {
     virtual std::map<std::string, Tensor<DType>> getParameters() { return {}; }
 
     /**
+     * @brief Set multiple parameters from a map.
+     * @param params Map of string names to tensor.
+     */
+    virtual void setParameters(const std::map<std::string, Tensor<DType>>& params) {}
+
+    /**
      * @brief Obtains all the gradients for all parameters of the layer or module.
      * The default implementation returns an empty map.
      * The keys refer to the name of the parameter (weights, biases, etc.)
@@ -61,6 +67,13 @@ template <typename DType = float> struct Layer {
      * @return map<string, Tensor> A map of parameter names to their tensors.
      */
     virtual std::map<std::string, Tensor<DType>> getGradients() { return {}; }
+
+    /**
+     * @brief Resets all parameter gradients to zero. 
+     * Layers with learnable parameters override this to clear their gradients.
+     * Container layers (MLP, TransformerBlock, Transformer) override this to propagate to sub-layers.
+     */
+    virtual void zeroGrad() {}
 
     /**
      * @brief Performs a single in-place SGD update: param -= lr * grad.

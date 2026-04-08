@@ -53,7 +53,7 @@ template <typename DType = float> struct OutputProjectionLayer {
         int batchSize = input.size() / (sequenceLength * (headDim * numHeads));
         std::vector<size_t> outputShape = {(size_t)batchSize, (size_t)sequenceLength, (size_t)inputDim};
         Tensor<DType> output(outputShape);
-
+        
         dim3 threadsPerBlock(BLOCKDIM, BLOCKDIM);
         dim3 gridProj((inputDim + BLOCKDIM - 1) / BLOCKDIM, (batchSize * sequenceLength + BLOCKDIM - 1) / BLOCKDIM);
         attentionProj<DType><<<gridProj, threadsPerBlock, 2 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
@@ -74,7 +74,6 @@ template <typename DType = float> struct OutputProjectionLayer {
 
         int sequenceLength = input.shape()[input.nDim() - 2];
         int batchSize = input.size() / (sequenceLength * (headDim * numHeads));
-
         dim3 threadsPerBlock(BLOCKDIM, BLOCKDIM);
         int totalHeadDim = headDim * numHeads;
 

@@ -9,3 +9,6 @@
 *.o
 *.out
 *.log
+.vscode/
+.DS_Store
+__pycache__/

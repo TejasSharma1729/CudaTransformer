@@ -34,7 +34,7 @@ template <typename DType = float> __global__ void linearForward(
     int colIdx = blockIdx.x * blockDim.x + threadIdx.x; // outputDim index
     int rowIdx = blockIdx.y * blockDim.y + threadIdx.y; // batchSize index
 
-    DType accum = static_cast<DType>(0);
+    DType accum = (biases != nullptr && colIdx < outputDim) ? biases[colIdx] : static_cast<DType>(0);
 
     for (int tile = 0; tile < inputDim; tile += blockDim.x) {
         if (rowIdx < batchSize && (tile + threadIdx.x) < inputDim) {
@@ -59,7 +59,7 @@ template <typename DType = float> __global__ void linearForward(
     }
 
     if (rowIdx < batchSize && colIdx < outputDim) {
-        output[rowIdx * outputDim + colIdx] = accum + biases[colIdx];
+        output[rowIdx * outputDim + colIdx] = accum;
     }
 }
 
@@ -128,7 +128,7 @@ template <typename DType = float> __global__ void linearBackwardWB(
     for (int offset = 16; offset > 0; offset /= 2) {
         biasAccum += __shfl_down_sync(0xffffffff, biasAccum, offset);
     }
-    if (threadIdx.x == 0 && outputIdx < outputDim && blockIdx.x == 0) {
+    if (threadIdx.x == 0 && outputIdx < outputDim && blockIdx.x == 0 && biasesGrad != nullptr) {
         atomicAdd(&biasesGrad[outputIdx], biasAccum);
     }
 }

@@ -9,8 +9,7 @@
 template <typename DType = float> struct CheckpointLayer : public Layer<DType> {
     Tensor<DType> activationStorage; ///< Stored input activations for re-computation.
 
-    CheckpointLayer() : Layer<DType>() {
-    }
+    CheckpointLayer() : Layer<DType>() { }
 
     /** @brief Clones the checkpoint layer and its stored data. */
     std::shared_ptr<Layer<DType>> clone() override { 

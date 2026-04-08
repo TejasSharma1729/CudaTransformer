@@ -114,6 +114,16 @@ template <typename DType = float> struct LinearLayer : public Layer<DType> {
     }
 
     /**
+     * @brief Set parameters from a dictionary. Only keys matching the 2 expected parameter names are used; others are ignored.
+     * @param params Map of parameter names to Tensors.
+     *      The layer will adopt the device buffers of the provided Tensors for any matching keys.
+     */
+    void setParameters(const std::map<std::string, Tensor<DType>>& params) override {
+        if (params.count("weights")) setWeights(params.at("weights"));
+        if (params.count("biases")) setBiases(params.at("biases"));
+    }
+
+    /**
      * @brief Get all gradients as a map of name to Tensor.
      * Returns lazily-allocated zero tensors if backward not yet called.
      * @return Map of gradient names to Tensor views (shared device buffers).
@@ -175,9 +185,16 @@ template <typename DType = float> struct LinearLayer : public Layer<DType> {
         biasGrad = t.dataPtr();
     }
 
-    // -------------------------------------------------------------------------
-    // SGD update
-    // -------------------------------------------------------------------------
+    /**
+     * @brief Resets all parameter gradients to zero.
+     * Gradient buffers are lazily allocated if backward has not been called.
+     */
+    void zeroGrad() override {
+        if (weightGrad != nullptr) 
+            cudaMemset(weightGrad.get(), 0, inputDim * outputDim * sizeof(DType));
+        if (biasGrad != nullptr) 
+            cudaMemset(biasGrad.get(), 0, outputDim * sizeof(DType));
+    }
 
     /**
      * @brief In-place SGD step: weights -= lr * weightGrad, biases -= lr * biasGrad.

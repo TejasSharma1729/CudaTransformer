@@ -105,6 +105,7 @@ template <typename DType = float> struct AttentionLayer : public Layer<DType> {
 
         Tensor<DType> attentionOutput = flashAttn.computeAttention(queries, keys, values);
         std::vector<size_t> reshapedShape = {(size_t)batchSize, (size_t)sequenceLength, (size_t)(numHeads * headDim)};
+
         Tensor<DType> reshapedAttn(reshapedShape);
         cudaMemcpy(reshapedAttn.get(), attentionOutput.get(), attentionOutput.size() * sizeof(DType), cudaMemcpyDeviceToDevice);
 
@@ -267,9 +268,32 @@ template <typename DType = float> struct AttentionLayer : public Layer<DType> {
      */
     void setOutputBiases(Tensor<DType> t) { outProj.biasesProj = t.dataPtr(); }
 
-    // -------------------------------------------------------------------------
-    // SGD update
-    // -------------------------------------------------------------------------
+    /**
+     * @brief Resets all parameter gradients to zero.
+     * Gradient buffers are lazily allocated if backward has not been called.
+     */
+    void zeroGrad() override {
+        int projSize = inputDim * headDim * numHeads;
+        int biasSize = headDim * numHeads;
+        int totalHeadDim = headDim * numHeads;
+
+        if (qkvProj.weightsQueryGrad != nullptr) 
+            cudaMemset(qkvProj.weightsQueryGrad.get(), 0, projSize * sizeof(DType));
+        if (qkvProj.weightsKeyGrad != nullptr) 
+            cudaMemset(qkvProj.weightsKeyGrad.get(), 0, projSize * sizeof(DType));
+        if (qkvProj.weightsValueGrad != nullptr) 
+            cudaMemset(qkvProj.weightsValueGrad.get(), 0, projSize * sizeof(DType));
+        if (qkvProj.biasesQueryGrad != nullptr) 
+            cudaMemset(qkvProj.biasesQueryGrad.get(), 0, biasSize * sizeof(DType));
+        if (qkvProj.biasesKeyGrad != nullptr) 
+            cudaMemset(qkvProj.biasesKeyGrad.get(), 0, biasSize * sizeof(DType));
+        if (qkvProj.biasesValueGrad != nullptr) 
+            cudaMemset(qkvProj.biasesValueGrad.get(), 0, biasSize * sizeof(DType));
+        if (outProj.weightsProjGrad != nullptr) 
+            cudaMemset(outProj.weightsProjGrad.get(), 0, totalHeadDim * inputDim * sizeof(DType));
+        if (outProj.biasesProjGrad != nullptr) 
+            cudaMemset(outProj.biasesProjGrad.get(), 0, inputDim * sizeof(DType));
+    }
 
     /**
      * @brief In-place SGD step for all QKV and output projection parameters.
@@ -324,6 +348,22 @@ template <typename DType = float> struct AttentionLayer : public Layer<DType> {
             {"output.weights", Tensor<DType>(outProj.weightsProj, {(size_t)(headDim * numHeads), (size_t)inputDim})},
             {"output.biases",  Tensor<DType>(outProj.biasesProj, {(size_t)inputDim})}
         };
+    }
+
+    /**
+     * @brief Sets parameters from a dictionary. Only keys matching the 8 expected parameter names are used; others are ignored.
+     * @param params Map of parameter names to Tensors. 
+     *      The layer will adopt the device buffers of the provided Tensors for any matching keys.
+     */
+    void setParameters(const std::map<std::string, Tensor<DType>>& params) override {
+        if (params.count("query.weights")) setQueryWeights(params.at("query.weights"));
+        if (params.count("query.biases")) setQueryBiases(params.at("query.biases"));
+        if (params.count("key.weights")) setKeyWeights(params.at("key.weights"));
+        if (params.count("key.biases")) setKeyBiases(params.at("key.biases"));
+        if (params.count("value.weights")) setValueWeights(params.at("value.weights"));
+        if (params.count("value.biases")) setValueBiases(params.at("value.biases"));
+        if (params.count("output.weights")) setOutputWeights(params.at("output.weights"));
+        if (params.count("output.biases")) setOutputBiases(params.at("output.biases"));
     }
 
     /**

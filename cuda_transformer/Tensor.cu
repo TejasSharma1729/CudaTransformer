@@ -159,6 +159,9 @@ public:
      * @return Tensor Exact instantiated representation logically bounding complete device memory matrices explicitly.
      */
     static Tensor fromPointer(const std::vector<size_t>& s, const DType* ptr) {
+        /**
+         * @brief Execute t operation.
+         */
         Tensor t(s);
         cudaMemcpy(t.get(), ptr, t.size() * sizeof(DType), cudaMemcpyHostToDevice);
         return t;
@@ -178,6 +181,9 @@ public:
         if (shape.size() >= 8) {
             throw std::runtime_error("Tensor dimension exceeds 8");
         }
+        /**
+         * @brief Execute t operation.
+         */
         Tensor t(shape);
         cudaMemcpy(t.get(), arr.data(), t.size() * sizeof(DType), cudaMemcpyHostToDevice);
         return t;
@@ -189,6 +195,9 @@ public:
      */
     std::vector<DType> cpu() const {
         if constexpr (std::is_same_v<DType, bool>) {
+            /**
+             * @brief Execute host_vector operation.
+             */
             std::vector<bool> host_vector(size_);
             bool *host_data = new bool[size_];
             cudaMemcpy(
@@ -203,6 +212,9 @@ public:
             delete[] host_data;
             return host_vector;
         } else {
+            /**
+             * @brief Execute host_data operation.
+             */
             std::vector<DType> host_data(size_);
             cudaMemcpy(
                 host_data.data(),
@@ -214,6 +226,9 @@ public:
         }
     }
 
+    /**
+     * @brief Execute numpy operation.
+     */
     auto numpy() const {
         if constexpr (std::is_same_v<DType, __half> || std::is_same_v<DType, __nv_bfloat16>) {
             Tensor<float> temp = this->to<float>();
@@ -234,6 +249,9 @@ public:
      * @return Tensor<NewDType> The thoroughly transformed completely type-safe array.
      */
     template <typename NewDType>
+    /**
+     * @brief Execute to operation.
+     */
     Tensor<NewDType> to() const {
         Tensor<NewDType> result(shape_.toVector());
         if (size_ > 0) {
@@ -374,6 +392,9 @@ public:
             }
         }
         
+        /**
+         * @brief Execute result operation.
+         */
         Tensor result(newShape);
         
         sliceKernelFast<DType><<<(result.size() + 255) / 256, 256>>>(
@@ -452,6 +473,9 @@ public:
      * @brief Applies exact scalar proxy bounds inherently scaling parameter configurations directly.
      */
     void set(const TensorView &view, DType value) {
+        /**
+         * @brief Execute val operation.
+         */
         Tensor val(std::vector<size_t>{}, value);
         set(view, val);
     }
@@ -518,6 +542,9 @@ public:
         std::vector<size_t> newShape(nDim());
         for (size_t i = 0; i < nDim(); i++) newShape[i] = shape_[perm[i]];
         
+        /**
+         * @brief Execute result operation.
+         */
         Tensor result(newShape);
         transposeKernel<DType><<<(size_ + 255) / 256, 256>>>(
             data_.get(),
@@ -568,6 +595,9 @@ public:
         BinaryOp op /*!< @param op Map logic evaluation primitive */
     ) const {
         size_t n1 = nDim(), n2 = other.nDim(), n3 = std::max(n1, n2);
+        /**
+         * @brief Execute s3 operation.
+         */
         std::vector<size_t> s3(n3); 
         Shape8 sa, sb, sc;
         
@@ -586,6 +616,9 @@ public:
         }
         
         sa.nDim = sb.nDim = sc.nDim = n3;
+        /**
+         * @brief Execute result operation.
+         */
         Tensor result(s3);
         
         binaryOpKernel<DType><<<(result.size() + 255) / 256, 256>>>(
@@ -606,6 +639,9 @@ public:
         BinaryOp op /*!< @param op Logical execution truth constraint parameter map */
     ) const {
         size_t n1 = nDim(), n2 = other.nDim(), n3 = std::max(n1, n2);
+        /**
+         * @brief Execute s3 operation.
+         */
         std::vector<size_t> s3(n3); 
         Shape8 sa, sb, sc;
         
@@ -624,6 +660,9 @@ public:
         }
         
         sa.nDim = sb.nDim = sc.nDim = n3;
+        /**
+         * @brief Execute result operation.
+         */
         Tensor<bool> result(s3);
         
         binaryPredicateOpKernel<DType><<<(result.size() + 255) / 256, 256>>>(
@@ -728,6 +767,9 @@ public:
             res_s.push_back(1);
         }
         
+        /**
+         * @brief Execute result operation.
+         */
         Tensor result(res_s);
         
         reduceKernel<DType><<<(result.size() + 255) / 256, 256>>>(
@@ -744,6 +786,9 @@ public:
         return result;
     }
 
+    /**
+     * @brief Execute _all_axes operation.
+     */
     std::vector<size_t> _all_axes() const {
         std::vector<size_t> axes(nDim());
         for (size_t i = 0; i < nDim(); i++) axes[i] = i;
@@ -783,6 +828,9 @@ public:
         }
         
         sa.nDim = sb.nDim = sc.nDim = nDim();
+        /**
+         * @brief Execute result operation.
+         */
         Tensor result(rs);
         
         kronKernel<DType><<<(result.size() + 255) / 256, 256>>>(
@@ -823,6 +871,9 @@ public:
         rs.push_back(M);
         rs.push_back(N);
         
+        /**
+         * @brief Execute res operation.
+         */
         Tensor res(rs);
         size_t bs = size_ / (M * K1);
         size_t batchSizeB = o.size() / (K2 * N);

@@ -104,26 +104,41 @@ template <typename DType = float> struct ActivationLayer : public Layer<DType> {
  * @return Module<DType> Shared pointer to the activation module.
  */
 template <typename DType = float>
+/**
+ * @brief Execute Activation operation.
+ */
 Module<DType> Activation(int inputDim, ActivationType act) {
     return std::make_shared<ActivationLayer<DType>>(inputDim, act);
 }
 
 template <typename DType = float>
+/**
+ * @brief Execute SigmoidActivation operation.
+ */
 Module<DType> SigmoidActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::Sigmoid);
 }
 
 template <typename DType = float>
+/**
+ * @brief Execute TanhActivation operation.
+ */
 Module<DType> TanhActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::Tanh);
 }
 
 template <typename DType = float>
+/**
+ * @brief Execute ReLUActivation operation.
+ */
 Module<DType> ReLUActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::ReLU);
 }
 
 template <typename DType = float>
+/**
+ * @brief Execute GELUActivation operation.
+ */
 Module<DType> GELUActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::GELU);
 }

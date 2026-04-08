@@ -1,10 +1,13 @@
-#include "TransformerLayer.cu"
+#include "NanoGPT.cu"
 #include "SGDOptimizer.cu"
 // Above includes auto-include everything; this is the final compilation unit.
 
 namespace py = pybind11;
 
 template <typename DType>
+/**
+ * @brief Execute declare_tensor operation.
+ */
 void declare_tensor(py::module &m, const std::string &type_suffix) {
     std::string tensor_name = type_suffix + "Tensor";
     py::class_<Tensor<DType>>(m, tensor_name.c_str(),
@@ -104,6 +107,9 @@ void declare_tensor(py::module &m, const std::string &type_suffix) {
 }
 
 template <typename DType>
+/**
+ * @brief Execute declare_modules operation.
+ */
 void declare_modules(py::module &m, const std::string &type_suffix) {
     // ------------------------------------------------------------------
     // Base Layer class — polymorphic handle visible from Python.
@@ -117,12 +123,37 @@ void declare_modules(py::module &m, const std::string &type_suffix) {
         .def("backward", &Layer<DType>::backward, py::arg("input"), py::arg("grad_output"),
             "Runs the backward pass given the original input and the upstream gradient. "
             "Accumulates parameter gradients internally and returns the input gradient.")
+        .def("getParameters", &Layer<DType>::getParameters,
+            "Returns a dictionary mapping parameter names to their Tensors.")
+        .def("setParameters", &Layer<DType>::setParameters, py::arg("params"),
+            "Sets parameter tensors from a dictionary. Unmatched keys are ignored.")
+        .def("getGradients", &Layer<DType>::getGradients,
+            "Returns a dictionary mapping parameter names to their gradient Tensors.")
+        .def("zeroGrad", &Layer<DType>::zeroGrad,
+            "Resets all parameter gradients to zero. For container layers, this propagates recursively to all sub-layers.")
         .def("sgdUpdate", &Layer<DType>::sgdUpdate, py::arg("lr"),
             "Applies a single SGD step in-place: param -= lr * grad. "
             "For container layers (MLP, TransformerBlock, Transformer) this propagates "
             "recursively to all sub-layers. Stateless layers (Activation) are a no-op.")
         .def("__call__", &Layer<DType>::operator(), py::arg("input"),
             "Shorthand for forward(input).");
+    
+    // ------------------------------------------------------------------
+    // LayerNormLayer — per-token layer normalization with learnable gain/shift.
+    // ------------------------------------------------------------------
+    py::class_<LayerNormLayer<DType>, Layer<DType>, std::shared_ptr<LayerNormLayer<DType>>>(
+            m, (type_suffix + "LayerNormLayer").c_str(),
+            "Layer Normalization Layer.")
+        .def("forward", &LayerNormLayer<DType>::forward, py::arg("input"))
+        .def("backward", &LayerNormLayer<DType>::backward, py::arg("input"), py::arg("grad_output"))
+        .def("zeroGrad", &LayerNormLayer<DType>::zeroGrad)
+        .def("sgdUpdate", &LayerNormLayer<DType>::sgdUpdate, py::arg("lr"))
+        .def("__call__", &LayerNormLayer<DType>::operator(), py::arg("input"));
+
+        m.def(("LayerNorm" + type_suffix).c_str(), [](int inputDim, DType epsilon) {
+        return std::make_shared<LayerNormLayer<DType>>(inputDim, epsilon);
+    }, py::arg("input_dim"), py::arg("epsilon") = 1e-5,
+    "Creates a LayerNormLayer.");
 
     // ------------------------------------------------------------------
     // ActivationLayer — dispatches ReLU / GELU / Sigmoid / Tanh by enum.
@@ -245,6 +276,9 @@ void declare_modules(py::module &m, const std::string &type_suffix) {
     // ------------------------------------------------------------------
     // Factory functions (return base Module, resolved to concrete type by pybind11).
     // ------------------------------------------------------------------
+    m.def(("LayerNorm" + type_suffix).c_str(), &LayerNorm<DType>,
+        py::arg("input_dim"), py::arg("epsilon") = 1e-5,
+        "Creates a LayerNormLayer with the given input dimension and epsilon for numerical stability.");
     m.def(("Linear" + type_suffix).c_str(),           &Linear<DType>,
         py::arg("input_dim"), py::arg("output_dim"),
         "Creates a LinearLayer: output = input @ weights.T + biases.");
@@ -270,9 +304,103 @@ void declare_modules(py::module &m, const std::string &type_suffix) {
 }
 
 template <typename DType>
+/**
+ * @brief Execute declare_tensor_and_modules operation.
+ */
 void declare_tensor_and_modules(py::module &m, const std::string &type_suffix) {
     declare_tensor<DType>(m, type_suffix);
     declare_modules<DType>(m, type_suffix);
+}
+
+
+template <typename DType = float, typename IdType = int>
+void declare_nanogpt(py::module &m, const std::string &type_suffix) {
+    py::class_<TokenEmbedding<DType, IdType>>(m, (type_suffix + "TokenEmbedding").c_str())
+        .def(py::init<int, int>(), py::arg("vocab_size"), py::arg("embedding_dim"))
+        .def("forward", &TokenEmbedding<DType, IdType>::forward)
+        .def("__call__", &TokenEmbedding<DType, IdType>::operator())
+        .def("backward", &TokenEmbedding<DType, IdType>::backward)
+        .def("getParameters", &TokenEmbedding<DType, IdType>::getParameters)
+        .def("setParameters", &TokenEmbedding<DType, IdType>::setParameters, py::arg("params"))
+        .def("getGradients", &TokenEmbedding<DType, IdType>::getGradients)
+        .def("zeroGrad", &TokenEmbedding<DType, IdType>::zeroGrad)
+        .def("sgdUpdate", &TokenEmbedding<DType, IdType>::sgdUpdate);
+
+    py::class_<PositionEmbedding<DType, IdType>>(m, (type_suffix + "PositionEmbedding").c_str())
+        .def(py::init<int, int>(), py::arg("max_seq_len"), py::arg("embedding_dim"))
+        .def("forward", &PositionEmbedding<DType, IdType>::forward)
+        .def("__call__", &PositionEmbedding<DType, IdType>::operator())
+        .def("backward", &PositionEmbedding<DType, IdType>::backward)
+        .def("getParameters", &PositionEmbedding<DType, IdType>::getParameters)
+        .def("setParameters", &PositionEmbedding<DType, IdType>::setParameters, py::arg("params"))
+        .def("getGradients", &PositionEmbedding<DType, IdType>::getGradients)
+        .def("zeroGrad", &PositionEmbedding<DType, IdType>::zeroGrad)
+        .def("sgdUpdate", &PositionEmbedding<DType, IdType>::sgdUpdate);
+
+    py::class_<UnEmbedding<DType>>(m, (type_suffix + "UnEmbedding").c_str())
+        .def(py::init<int, int>(), py::arg("vocab_size"), py::arg("embedding_dim"))
+        .def("forward", &UnEmbedding<DType>::forward)
+        .def("__call__", &UnEmbedding<DType>::operator())
+        .def("backward", &UnEmbedding<DType>::backward)
+        .def("getParameters", &UnEmbedding<DType>::getParameters)
+        .def("setParameters", &UnEmbedding<DType>::setParameters, py::arg("params"))
+        .def("getGradients", &UnEmbedding<DType>::getGradients)
+        .def("zeroGrad", &UnEmbedding<DType>::zeroGrad)
+        .def("sgdUpdate", &UnEmbedding<DType>::sgdUpdate);
+
+    py::class_<CrossEntropyLoss<DType, IdType>>(m, (type_suffix + "CrossEntropyLoss").c_str())
+        .def(py::init<>())
+        .def("forward", &CrossEntropyLoss<DType, IdType>::forward)
+        .def("__call__", &CrossEntropyLoss<DType, IdType>::operator())
+        .def("backward", &CrossEntropyLoss<DType, IdType>::backward);
+
+    py::class_<NanoGPT<DType, IdType>>(m, (type_suffix + "NanoGPT").c_str())
+        .def(py::init<int, int, int, int, int, int, int, int, DType, ActivationType>(),
+             py::arg("vocab_size"), py::arg("max_seq_len"), py::arg("embedding_dim"),
+             py::arg("num_heads"), py::arg("head_dim"), py::arg("mlp_dim"), py::arg("num_layers"),
+             py::arg("checkpoint_gap") = 0, py::arg("temperature") = (DType)1.0, 
+             py::arg("activation_type") = ActivationType::ReLU)
+        .def("vocabSize", &NanoGPT<DType, IdType>::vocabSize)
+        .def("maxSeqLen", &NanoGPT<DType, IdType>::maxSeqLen)
+        .def("embeddingDim", &NanoGPT<DType, IdType>::embeddingDim)
+        .def("numHeads", &NanoGPT<DType, IdType>::numHeads)
+        .def("headDim", &NanoGPT<DType, IdType>::headDim)
+        .def("mlpDim", &NanoGPT<DType, IdType>::mlpDim)
+        .def("numLayers", &NanoGPT<DType, IdType>::numLayers)
+        .def("checkpointGap", &NanoGPT<DType, IdType>::checkpointGap)
+        .def("getTemperature", &NanoGPT<DType, IdType>::getTemperature)
+        .def("setTemperature", &NanoGPT<DType, IdType>::setTemperature)
+        .def("activationType", &NanoGPT<DType, IdType>::activationType)
+        .def("forward", (Tensor<DType> (NanoGPT<DType, IdType>::*)(Tensor<IdType>)) &NanoGPT<DType, IdType>::forward)
+        .def("forward", (Tensor<DType> (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>)) &NanoGPT<DType, IdType>::forward)
+        .def("forward", (Tensor<DType> (NanoGPT<DType, IdType>::*)(std::vector<IdType>)) &NanoGPT<DType, IdType>::forward)
+        .def("__call__", (Tensor<DType> (NanoGPT<DType, IdType>::*)(Tensor<IdType>)) &NanoGPT<DType, IdType>::operator())
+        .def("__call__", (Tensor<DType> (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>)) &NanoGPT<DType, IdType>::operator())
+        .def("__call__", (Tensor<DType> (NanoGPT<DType, IdType>::*)(std::vector<IdType>)) &NanoGPT<DType, IdType>::operator())
+        .def("predict", &NanoGPT<DType, IdType>::predict, py::arg("logits"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
+        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(Tensor<IdType>, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::sample,
+             py::arg("input"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
+        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::sample,
+             py::arg("input"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
+        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(std::vector<IdType>, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::sample,
+             py::arg("input"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
+        .def("generate", (Tensor<IdType> (NanoGPT<DType, IdType>::*)(Tensor<IdType>, int, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::generate,
+             py::arg("input"), py::arg("num_tokens"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
+        .def("generate", (pybind11::array_t<IdType> (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, int, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::generate,
+             py::arg("input"), py::arg("num_tokens"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
+        .def("generate", (std::vector<IdType> (NanoGPT<DType, IdType>::*)(std::vector<IdType>, int, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::generate,
+             py::arg("input"), py::arg("num_tokens"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
+        .def("train", (void (NanoGPT<DType, IdType>::*)(std::vector<IdType>, int, int, DType)) &NanoGPT<DType, IdType>::train,
+             py::arg("input"), py::arg("batch_size"), py::arg("num_epochs"), py::arg("learning_rate"))
+        .def("train", (void (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, int, int, DType)) &NanoGPT<DType, IdType>::train,
+             py::arg("input"), py::arg("batch_size"), py::arg("num_epochs"), py::arg("learning_rate"))
+        .def("loss", &NanoGPT<DType, IdType>::loss)
+        .def("backward", &NanoGPT<DType, IdType>::backward)
+        .def("zeroGrad", &NanoGPT<DType, IdType>::zeroGrad)
+        .def("sgdUpdate", &NanoGPT<DType, IdType>::sgdUpdate)
+        .def("getParameters", &NanoGPT<DType, IdType>::getParameters)
+        .def("setParameters", &NanoGPT<DType, IdType>::setParameters)
+        .def("getGradients", &NanoGPT<DType, IdType>::getGradients);
 }
 
 PYBIND11_MODULE(cuda_transformer, m) {
@@ -336,4 +464,9 @@ PYBIND11_MODULE(cuda_transformer, m) {
     declare_tensor<short>(m, "Short");
     declare_tensor<signed char>(m, "Byte");
     declare_tensor<bool>(m, "Bool");
+
+    declare_nanogpt<float, int>(m, "Float");
+    declare_nanogpt<__nv_bfloat16, int>(m, "BFloat");
+    declare_nanogpt<__half, int>(m, "Half");
+    declare_nanogpt<double, int>(m, "Double");
 }

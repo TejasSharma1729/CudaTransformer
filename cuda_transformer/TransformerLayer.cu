@@ -42,7 +42,9 @@ template <typename DType = float> struct TransformerLayer : public Layer<DType> 
 
     /** @brief Clones the transformer. */
     std::shared_ptr<Layer<DType>> clone() override {
-        auto clonedLayer = std::make_shared<TransformerLayer<DType>>(inputDim, numHeads, headDim, mlpDim, numLayers, checkpointGap, activationType);
+        auto clonedLayer = std::make_shared<TransformerLayer<DType>>(
+            inputDim, numHeads, headDim, mlpDim, numLayers, checkpointGap, activationType
+        );
         clonedLayer->modelLayers.clear();
         for (auto layer : modelLayers) {
             clonedLayer->modelLayers.push_back(layer->clone());
@@ -68,34 +70,56 @@ template <typename DType = float> struct TransformerLayer : public Layer<DType> 
             auto checkpointPtr = std::dynamic_pointer_cast<CheckpointLayer<DType>>(modelLayers[l]);
             if (checkpointPtr == nullptr) continue;
 
+            /**
+             * @brief Execute activations operation.
+             */
             std::vector<Tensor<DType>> activations(1, checkpointPtr->activationStorage);
             for (int layerIdx = l + 1; layerIdx < lastLayerIdx; layerIdx++) {
                 auto modelLayer = std::dynamic_pointer_cast<TransformerBlockLayer<DType>>(modelLayers[layerIdx]);
+                activations.push_back(modelLayer->firstNorm->forward(activations.back()));
                 activations.push_back(modelLayer->attention->forward(activations.back()));
+                activations.push_back(modelLayer->secondNorm->forward(activations.back()));
                 activations.push_back(modelLayer->mlp->forward(activations.back()));
             }
             for (int layerIdx = lastLayerIdx - 1; layerIdx >= l; layerIdx--) {
-                int baseActivation = 2 * (layerIdx - l);
+                int baseActivation = 4 * (layerIdx - l);
                 auto modelLayer = std::dynamic_pointer_cast<TransformerBlockLayer<DType>>(modelLayers[layerIdx]);
                 propagatedGrad = modelLayer->mlp->backward(activations[baseActivation + 1], propagatedGrad);
+                propagatedGrad = modelLayer->secondNorm->backward(activations[baseActivation + 2], propagatedGrad);
                 propagatedGrad = modelLayer->attention->backward(activations[baseActivation], propagatedGrad);
+                propagatedGrad = modelLayer->firstNorm->backward(activations[baseActivation + 3], propagatedGrad);
             }
             lastLayerIdx = l;
         }
 
+        /**
+         * @brief Execute activations operation.
+         */
         std::vector<Tensor<DType>> activations(1, input);
         for (int layerIdx = 0; layerIdx < lastLayerIdx; layerIdx++) {
             auto modelLayer = std::dynamic_pointer_cast<TransformerBlockLayer<DType>>(modelLayers[layerIdx]);
+            activations.push_back(modelLayer->firstNorm->forward(activations.back()));
             activations.push_back(modelLayer->attention->forward(activations.back()));
+            activations.push_back(modelLayer->secondNorm->forward(activations.back()));
             activations.push_back(modelLayer->mlp->forward(activations.back()));
         }
         for (int layerIdx = lastLayerIdx - 1; layerIdx >= 0; layerIdx--) {
             int baseActivation = 2 * layerIdx;
             auto modelLayer = std::dynamic_pointer_cast<TransformerBlockLayer<DType>>(modelLayers[layerIdx]);
             propagatedGrad = modelLayer->mlp->backward(activations[baseActivation + 1], propagatedGrad);
+            propagatedGrad = modelLayer->secondNorm->backward(activations[baseActivation + 2], propagatedGrad);
             propagatedGrad = modelLayer->attention->backward(activations[baseActivation], propagatedGrad);
+            propagatedGrad = modelLayer->firstNorm->backward(activations[baseActivation + 3], propagatedGrad);
         }
         return propagatedGrad;
+    }
+
+    /**
+     * @brief Resets all parameter gradients in every sub-layer (transformer blocks and checkpoints).
+     */
+    void zeroGrad() override {
+        for (auto& layer : modelLayers) 
+            layer->zeroGrad();
     }
 
     /**
@@ -104,7 +128,8 @@ template <typename DType = float> struct TransformerLayer : public Layer<DType> 
      * @param lr Learning rate.
      */
     void sgdUpdate(DType lr) override {
-        for (auto &layer : modelLayers) layer->sgdUpdate(lr);
+        for (auto &layer : modelLayers) 
+            layer->sgdUpdate(lr);
     }
 
     /**
@@ -122,6 +147,20 @@ template <typename DType = float> struct TransformerLayer : public Layer<DType> 
             }
         }
         return params;
+    }
+
+    /**
+     * @brief Execute setParameters operation.
+     */
+    void setParameters(const std::map<std::string, Tensor<DType>>& params) override {
+        for (size_t i = 0; i < modelLayers.size(); i++) {
+            std::string prefix = "layer_" + std::to_string(i) + ".";
+            std::map<std::string, Tensor<DType>> layerParams;
+            for (const auto& [name, tensor] : params) {
+                if (name.find(prefix) == 0) layerParams[name.substr(prefix.size())] = tensor;
+            }
+            if (!layerParams.empty()) modelLayers[i]->setParameters(layerParams);
+        }
     }
 
     /**

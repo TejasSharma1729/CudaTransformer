@@ -128,6 +128,9 @@ __global__ void transposeKernel(
  * @brief Executes scalar-to-scalar unary transformations instantly on natively driven GPU memory.
  */
 template <typename DType>
+/**
+ * @brief Execute applyUnary operation.
+ */
 __device__ DType applyUnary(DType a, UnaryOp op) {
     if constexpr (std::is_same_v<DType, bool>) {
         if (op == UnaryOp::NEG || op == UnaryOp::NOT) return !a;
@@ -152,6 +155,9 @@ __device__ DType applyUnary(DType a, UnaryOp op) {
  * @brief Grid wrapper accelerating the parallel evaluation of mathematically pure unary operations.
  */
 template <typename DType>
+/**
+ * @brief Execute unaryOpKernel operation.
+ */
 __global__ void unaryOpKernel(const DType *a, DType *c, size_t size, UnaryOp op) {
     size_t idx = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -163,6 +169,9 @@ __global__ void unaryOpKernel(const DType *a, DType *c, size_t size, UnaryOp op)
  * @brief Evaluates an inherent mathematical application for binary operations linking variables.
  */
 template <typename DType>
+/**
+ * @brief Execute applyBinary operation.
+ */
 __device__ DType applyBinary(DType a, DType b, BinaryOp op) {
     switch (op) {
         case BinaryOp::ADD: return a + b;
@@ -190,6 +199,9 @@ __device__ DType applyBinary(DType a, DType b, BinaryOp op) {
  * @return Structurally guaranteed true or false mapping identical representations.
  */
 template <typename DType>
+/**
+ * @brief Execute applyPredicate operation.
+ */
 __device__ bool applyPredicate(DType a, DType b, BinaryOp op) {
     switch (op) {
         case BinaryOp::EQ: return a == b;
