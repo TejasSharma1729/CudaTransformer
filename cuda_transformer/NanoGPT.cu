@@ -20,10 +20,11 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
 
     NanoGPT(
         int vocabSize, int maxSeqLen, int embeddingDim, int numHeads, int headDim, int mlpDim, int numLayers,
-        int checkpointGap = 0, DType temperature = (DType)1.0, ActivationType activationType = ActivationType::ReLU
+        int checkpointGap = 0, double temperature = 1.0, ActivationType activationType = ActivationType::ReLU
     ) : tokenEmbedding(vocabSize, embeddingDim), positionEmbedding(maxSeqLen, embeddingDim),
         transformerLayer(embeddingDim, numHeads, headDim, mlpDim, numLayers, checkpointGap, activationType),
-        unEmbedding(vocabSize, embeddingDim), preUnembeddingCheckpoint(), crossEntropyLoss() { }
+        unEmbedding(vocabSize, embeddingDim), preUnembeddingCheckpoint(), 
+        temperature((DType)temperature), crossEntropyLoss() { }
     
     int vocabSize() const { return tokenEmbedding.vocabSize; }
     int maxSeqLen() const { return positionEmbedding.blockSize; }
@@ -33,8 +34,8 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     int mlpDim() const { return transformerLayer.mlpDim; }
     int numLayers() const { return transformerLayer.numLayers; }
     int checkpointGap() const { return transformerLayer.checkpointGap; }
-    DType getTemperature() const { return temperature; }
-    void setTemperature(DType temp) { temperature = temp; }
+    double getTemperature() const { return (DType)temperature; }
+    void setTemperature(double temp) { temperature = (DType)temp; }
     ActivationType activationType() const { return transformerLayer.activationType; }
 
     /**
@@ -87,7 +88,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     /**
      * @brief Execute predict operation.
      */
-    IdType predict(Tensor<DType> logits, SamplingMode mode, int K = 10, DType P = 0.1) {
+    IdType predict(Tensor<DType> logits, SamplingMode mode, int K = 10, double P = 0.1) {
         assert(logits.nDim() == 2); // (seqLen, vocabSize) -- does not support batched requests.
         int seqLen = logits.shape(0);
         int vocabSize = logits.shape(1);
@@ -109,7 +110,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
         std::vector<std::pair<IdType, DType>> idLogitPairs;
         if (mode == SamplingMode::Nucleus) {
             for (int i = 0; i < vocabSize; i++) {
-                if (hostLogits[i] > P) { // Filter out logits that are effectively -inf
+                if (hostLogits[i] > (DType)P) { // Filter out logits that are effectively -inf
                     idLogitPairs.emplace_back(i, hostLogits[i]);
                 }
             }
@@ -136,7 +137,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     /**
      * @brief Execute sample operation.
      */
-    IdType sample(Tensor<IdType> input, SamplingMode mode, int K = 10, DType P = 0.1) {
+    IdType sample(Tensor<IdType> input, SamplingMode mode, int K = 10, double P = 0.1) {
         Tensor<DType> logits = forward(input);
         return predict(logits, mode, K, P);
     }
@@ -144,7 +145,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     /**
      * @brief Execute sample operation.
      */
-    IdType sample(pybind11::array_t<IdType> input, SamplingMode mode, int K = 10, DType P = 0.1) {
+    IdType sample(pybind11::array_t<IdType> input, SamplingMode mode, int K = 10, double P = 0.1) {
         Tensor<DType> logits = forward(input);
         return predict(logits, mode, K, P);
     }
@@ -152,7 +153,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     /**
      * @brief Execute sample operation.
      */
-    IdType sample(std::vector<IdType> input, SamplingMode mode, int K = 10, DType P = 0.1) {
+    IdType sample(std::vector<IdType> input, SamplingMode mode, int K = 10, double P = 0.1) {
         Tensor<DType> logits = forward(input);
         return predict(logits, mode, K, P);
     }
@@ -160,7 +161,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     /**
      * @brief Execute generate operation.
      */
-    std::vector<IdType> generate(std::vector<IdType> input, int numTokens, SamplingMode mode, int K = 10, DType P = 0.1) {
+    std::vector<IdType> generate(std::vector<IdType> input, int numTokens, SamplingMode mode, int K = 10, double P = 0.1) {
         std::vector<IdType> generatedIds = input;
         for (int i = 0; i < numTokens; i++) {
             Tensor<DType> logits = forward(generatedIds);
@@ -173,7 +174,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     /**
      * @brief Execute generate operation.
      */
-    pybind11::array_t<IdType> generate(pybind11::array_t<IdType> input, int numTokens, SamplingMode mode, int K = 10, DType P = 0.1) {
+    pybind11::array_t<IdType> generate(pybind11::array_t<IdType> input, int numTokens, SamplingMode mode, int K = 10, double P = 0.1) {
         assert(input.ndim() == 1); // Only support 1D input for generation
         std::vector<IdType> inputVec(input.size());
         for (ssize_t i = 0; i < input.size(); i++) {
@@ -190,7 +191,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     /**
      * @brief Execute generate operation.
      */
-    Tensor<IdType> generate(Tensor<IdType> input, int numTokens, SamplingMode mode, int K = 10, DType P = 0.1) {
+    Tensor<IdType> generate(Tensor<IdType> input, int numTokens, SamplingMode mode, int K = 10, double P = 0.1) {
         std::vector<IdType> inputVec(input.size());
         cudaMemcpy(inputVec.data(), input.get(), input.size() * sizeof(IdType), cudaMemcpyDeviceToHost);
         cudaDeviceSynchronize();

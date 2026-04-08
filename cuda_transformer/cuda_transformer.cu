@@ -358,7 +358,7 @@ void declare_nanogpt(py::module &m, const std::string &type_suffix) {
         .def(py::init<int, int, int, int, int, int, int, int, DType, ActivationType>(),
              py::arg("vocab_size"), py::arg("max_seq_len"), py::arg("embedding_dim"),
              py::arg("num_heads"), py::arg("head_dim"), py::arg("mlp_dim"), py::arg("num_layers"),
-             py::arg("checkpoint_gap") = 0, py::arg("temperature") = (DType)1.0, 
+             py::arg("checkpoint_gap") = 0, py::arg("temperature") = 1.0, 
              py::arg("activation_type") = ActivationType::ReLU)
         .def("vocabSize", &NanoGPT<DType, IdType>::vocabSize)
         .def("maxSeqLen", &NanoGPT<DType, IdType>::maxSeqLen)
@@ -378,17 +378,17 @@ void declare_nanogpt(py::module &m, const std::string &type_suffix) {
         .def("__call__", (Tensor<DType> (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>)) &NanoGPT<DType, IdType>::operator())
         .def("__call__", (Tensor<DType> (NanoGPT<DType, IdType>::*)(std::vector<IdType>)) &NanoGPT<DType, IdType>::operator())
         .def("predict", &NanoGPT<DType, IdType>::predict, py::arg("logits"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
-        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(Tensor<IdType>, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::sample,
+        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(Tensor<IdType>, SamplingMode, int, double)) &NanoGPT<DType, IdType>::sample,
              py::arg("input"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
-        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::sample,
+        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, SamplingMode, int, double)) &NanoGPT<DType, IdType>::sample,
              py::arg("input"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
-        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(std::vector<IdType>, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::sample,
+        .def("sample", (IdType (NanoGPT<DType, IdType>::*)(std::vector<IdType>, SamplingMode, int, double)) &NanoGPT<DType, IdType>::sample,
              py::arg("input"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
-        .def("generate", (Tensor<IdType> (NanoGPT<DType, IdType>::*)(Tensor<IdType>, int, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::generate,
+        .def("generate", (Tensor<IdType> (NanoGPT<DType, IdType>::*)(Tensor<IdType>, int, SamplingMode, int, double)) &NanoGPT<DType, IdType>::generate,
              py::arg("input"), py::arg("num_tokens"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
-        .def("generate", (pybind11::array_t<IdType> (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, int, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::generate,
+        .def("generate", (pybind11::array_t<IdType> (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, int, SamplingMode, int, double)) &NanoGPT<DType, IdType>::generate,
              py::arg("input"), py::arg("num_tokens"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
-        .def("generate", (std::vector<IdType> (NanoGPT<DType, IdType>::*)(std::vector<IdType>, int, SamplingMode, int, DType)) &NanoGPT<DType, IdType>::generate,
+        .def("generate", (std::vector<IdType> (NanoGPT<DType, IdType>::*)(std::vector<IdType>, int, SamplingMode, int, double)) &NanoGPT<DType, IdType>::generate,
              py::arg("input"), py::arg("num_tokens"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1)
         .def("train", (void (NanoGPT<DType, IdType>::*)(std::vector<IdType>, int, int, DType)) &NanoGPT<DType, IdType>::train,
              py::arg("input"), py::arg("batch_size"), py::arg("num_epochs"), py::arg("learning_rate"))
