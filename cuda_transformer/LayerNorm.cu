@@ -5,19 +5,29 @@
 #define LAYERNORM_LAYER
 
 
+/**
+ * @brief Layer normalization layer.
+ * Normalizes input across the last dimension and applies learnable scale and shift.
+ * @tparam DType The data type used for parameters and computations.
+ */
 template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
-    int inputDim;
-    int cachedN;
-    DType epsilon;
+    int inputDim; /// Size of the last dimension to normalize over.
+    int cachedN; /// Cached batch size from the last forward pass to manage dynamic allocation of mean and inv_std buffers.
+    DType epsilon; /// Small constant for numerical stability in variance calculation.
     
-    std::shared_ptr<DType[]> weights;
-    std::shared_ptr<DType[]> biases;
-    std::shared_ptr<DType[]> weightsGrad;
-    std::shared_ptr<DType[]> biasesGrad;
+    std::shared_ptr<DType[]> weights; /// Learnable scale parameters (gamma) for layer normalization.
+    std::shared_ptr<DType[]> biases; /// Learnable shift parameters (beta) for layer normalization.
+    std::shared_ptr<DType[]> weightsGrad; /// Gradient of the loss with respect to the weights (gamma).
+    std::shared_ptr<DType[]> biasesGrad; /// Gradient of the loss with respect to the biases (beta).
 
-    std::shared_ptr<DType[]> cache_mean;
-    std::shared_ptr<DType[]> cache_inv_std;
+    std::shared_ptr<DType[]> cache_mean; /// Cached mean values from the forward pass for use in backward pass.
+    std::shared_ptr<DType[]> cache_inv_std; /// Cached inverse standard deviation values for use in backward pass.
     
+    /** 
+     * @brief Constructor for LayerNormLayer.
+     * @param inputDim The size of the last dimension to normalize over (feature dimension).
+     * @param epsilon A small constant for numerical stability in variance calculation.
+     */
     LayerNormLayer(int inputDim, DType epsilon = 1e-5) 
         : inputDim(inputDim), epsilon(epsilon), cachedN(0) {
         weights = cudaMakeShared<DType>(inputDim, 1.0f);
@@ -27,7 +37,8 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 
     /**
-     * @brief Execute getParameters operation.
+     * @brief Returns a map of parameter names to their corresponding tensors for this layer.
+     * @return std::map<std::string, Tensor<DType>>
      */
     std::map<std::string, Tensor<DType>> getParameters() override {
         return {
@@ -37,7 +48,10 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 
     /**
-     * @brief Execute setParameters operation.
+     * @brief Sets the parameters of the layer from a given map. 
+     * This allows external code to update the weights and biases of the layer, 
+     * such as during loading from a checkpoint or applying updates from an optimizer.
+     * @param params A map where keys are parameter names ("weights", "biases") and values are the corresponding tensors.
      */
     void setParameters(const std::map<std::string, Tensor<DType>>& params) override {
         if (params.count("weights")) {
@@ -49,7 +63,8 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 
     /**
-     * @brief Execute clone operation.
+     * @brief Creates a deep copy of the layer and its parameters. 
+     * This is essential for operations like cloning layers in a transformer block.
      */
     std::shared_ptr<Layer<DType>> clone() override {
         auto cloned = std::make_shared<LayerNormLayer<DType>>(inputDim, epsilon);
@@ -59,7 +74,8 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 
     /**
-     * @brief Execute zeroGrad operation.
+     * @brief Resets the gradients for weights and biases to zero. T
+     * This should called before a new backward pass to clear out old gradient values.
      */
     void zeroGrad() override {
         cudaMemset(weightsGrad.get(), 0, inputDim * sizeof(DType));
@@ -67,7 +83,9 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 
     /**
-     * @brief Execute sgdUpdate operation.
+     * @brief Performs an in-place SGD update on the weights and biases using their gradients 
+     * and the specified learning rate.
+     * @param lr The learning rate to use for the SGD update.
      */
     void sgdUpdate(DType lr) override {
         layerNormUpdateKernel<<< (inputDim + 255) / 256, 256 >>>(
@@ -77,7 +95,11 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 
     /**
-     * @brief Execute forward operation.
+     * @brief Forward pass through the layer normalization layer.
+     * This normalizes the input across the last dimension and applies the learnable scale and shift.
+     * It also caches the mean and inverse standard deviation for use in the backward pass.
+     * @param input The input tensor to the layer normalization layer. Shape: [batch_size, seq_len, inputDim].
+     * @return The output tensor after applying layer normalization. Shape: [batch_size, seq_len, inputDim].
      */
     Tensor<DType> forward(Tensor<DType> input) override {
         int D = input.shape()[input.nDim() - 1];
@@ -103,7 +125,12 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 
     /**
-     * @brief Execute backward operation.
+     * @brief Executes the backward pass of the layer normalization layer to 
+     * compute gradients with respect to the input, weights, and biases.
+     * @param input The input tensor to the layer normalization layer. Shape: [batch_size, seq_len, inputDim].
+     * @param gradOutput The gradient of the loss with respect to the output of the layer normalization layer. 
+     *      Shape: [batch_size, seq_len, inputDim].
+     * @return The gradient of the loss with respect to the input of the layer normalization layer. Shape: [batch_size, seq_len, inputDim].
      */
     Tensor<DType> backward(Tensor<DType> input, Tensor<DType> gradOutput) override {
         int D = input.shape()[input.nDim() - 1];
@@ -123,7 +150,15 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
     }
 };
 
-template <typename DType> std::shared_ptr<Layer<DType>> LayerNorm(int inputDim, DType epsilon = (DType)1e-5) {
+/**
+ * @brief Factory function to create a LayerNormLayer instance.
+ * This provides a convenient way to create a layer normalization layer without directly dealing with the class.
+ * @tparam DType The data type for the layer parameters and computations.
+ * @param inputDim The size of the last dimension to normalize over (feature dimension).
+ * @param epsilon A small constant for numerical stability in variance calculation.
+ * @return Module<DType> A shared pointer to the created LayerNormLayer instance.
+ */
+template <typename DType> Module<DType> LayerNorm(int inputDim, DType epsilon = (DType)1e-5) {
     return std::make_shared<LayerNormLayer<DType>>(inputDim, epsilon);
 }
 

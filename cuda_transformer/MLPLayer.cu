@@ -9,6 +9,8 @@
 
 /**
  * @brief Multi-Layer Perceptron (MLP) container.
+ * A sequential container of any kind of layers (all supported).
+ * This also takes advantage of checkpointing.
  */
 template <typename DType = float> struct MLPLayer : public Layer<DType> {
     std::vector<Module<DType>> modelLayers; ///< Sequential list of sub-modules.
@@ -50,10 +52,9 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
             auto checkpointPtr = std::dynamic_pointer_cast<CheckpointLayer<DType>>(modelLayers[l]);
             if (checkpointPtr == nullptr) continue;
 
-            /**
-             * @brief Execute activations operation.
-             */
             std::vector<Tensor<DType>> activations(1, checkpointPtr->activationStorage);
+            checkpointPtr->clear(); // Clear checkpoint to free memory later on.
+            
             for (int layerIdx = l + 1; layerIdx < lastLayerIdx; layerIdx++) {
                 activations.push_back(modelLayers[layerIdx]->forward(activations.back()));
             }

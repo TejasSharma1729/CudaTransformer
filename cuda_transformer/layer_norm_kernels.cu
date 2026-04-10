@@ -3,14 +3,42 @@
 #ifndef LAYERNORM_LAYER_KERNELS
 #define LAYERNORM_LAYER_KERNELS
 
+/**
+ * @brief Layer normalization forward pass: normalize each row, then scale and shift.
+ *
+ * One CUDA block handles one row (one token position across the batch×sequence dimension).
+ * The kernel performs three sequential reduction sweeps over the feature dimension D using
+ * shared memory, computing:
+ *   1. mean  = (1/D) * sum(x)
+ *   2. var   = (1/D) * sum((x - mean)^2)
+ *   3. y[i]  = (x[i] - mean) * rsqrt(var + epsilon) * weight[i] + bias[i]
+ *
+ * The computed mean and inverse standard deviation are written to `cache_mean` and
+ * `cache_inv_std` for reuse in the backward kernel.
+ *
+ * Launch config: <<<N, threads, threads * sizeof(DType)>>>
+ *   N       — number of rows (totalBatchSize = batchSize * seqLen)
+ *   threads — number of threads per block (must be a power of 2, typically 256)
+ *
+ * @tparam DType    Floating-point data type (float, double, __half, __nv_bfloat16).
+ * @param input       Device pointer to input tensor [N, D].
+ * @param output      Device pointer to output tensor [N, D].
+ * @param weight      Device pointer to learnable scale (gamma) vector [D].
+ * @param bias        Device pointer to learnable shift (beta) vector [D].
+ * @param D           Feature dimension size (the dimension that is normalized).
+ * @param N           Total number of rows (batchSize * sequenceLength).
+ * @param epsilon     Small constant added to the variance for numerical stability.
+ * @param cache_mean  Device pointer to write per-row means [N] (read by backward kernel).
+ * @param cache_inv_std Device pointer to write per-row inverse std-devs [N] (read by backward kernel).
+ */
 template <typename DType = float> __global__ void layerNormForwardKernel(
     const DType* input,
-    DType* output, 
+    DType* output,
     const DType* weight,
-    const DType* bias, 
+    const DType* bias,
     int D,
     int N,
-    DType epsilon, 
+    DType epsilon,
     DType* cache_mean,
     DType* cache_inv_std
 ) {
@@ -64,6 +92,37 @@ template <typename DType = float> __global__ void layerNormForwardKernel(
     }
 }
 
+/**
+ * @brief Layer normalization backward pass: compute gradients for input, weight, and bias.
+ *
+ * One CUDA block handles one row (one token position).  Using the cached forward-pass
+ * statistics (mean, inv_std) the kernel computes the analytically exact gradient:
+ *
+ *   x_hat[i]          = (x[i] - mean) * inv_std
+ *   dx_hat[i]         = gradOutput[i] * weight[i]
+ *   mean_dx_hat       = (1/D) * sum(dx_hat)
+ *   mean_dx_hat_x_hat = (1/D) * sum(dx_hat * x_hat)
+ *   gradInput[i]      = inv_std * (dx_hat[i] - mean_dx_hat - x_hat[i] * mean_dx_hat_x_hat)
+ *
+ * Weight and bias gradients are accumulated via atomicAdd across blocks so that multiple
+ * rows can update the same feature-dimension index concurrently.
+ *
+ * Launch config: <<<N, threads, 2 * threads * sizeof(DType)>>>
+ *   N       — number of rows (totalBatchSize = batchSize * seqLen)
+ *   threads — number of threads per block (must be a power of 2, typically 256)
+ *
+ * @tparam DType       Floating-point data type.
+ * @param gradOutput   Device pointer to upstream gradients [N, D].
+ * @param input        Device pointer to original forward-pass input [N, D].
+ * @param gradInput    Device pointer to output input-gradient buffer [N, D].
+ * @param weight       Device pointer to learnable scale (gamma) vector [D].
+ * @param gradWeight   Device pointer to weight-gradient accumulator [D] (atomicAdd).
+ * @param gradBias     Device pointer to bias-gradient accumulator [D] (atomicAdd).
+ * @param cache_mean   Device pointer to per-row means cached during forward pass [N].
+ * @param cache_inv_std Device pointer to per-row inverse std-devs cached during forward [N].
+ * @param D            Feature dimension size.
+ * @param N            Total number of rows.
+ */
 template <typename DType = float> __global__ void layerNormBackwardKernel(
     const DType* gradOutput,
     const DType* input,
@@ -73,7 +132,7 @@ template <typename DType = float> __global__ void layerNormBackwardKernel(
     DType* gradBias,
     const DType* cache_mean,
     const DType* cache_inv_std,
-    int D, int N) 
+    int D, int N)
 {
     int idx = blockIdx.x; // one block per row
     if (idx >= N) return;
@@ -129,6 +188,23 @@ template <typename DType = float> __global__ void layerNormBackwardKernel(
     }
 }
 
+/**
+ * @brief In-place SGD update for layer-norm scale (gamma) and shift (beta) parameters.
+ *
+ * Applies the standard SGD rule element-wise:
+ *   w[i] -= lr * wg[i]
+ *   b[i] -= lr * bg[i]
+ *
+ * Launch config: <<<(D + 255) / 256, 256>>>
+ *
+ * @tparam DType  Floating-point data type.
+ * @param w   Device pointer to the scale (gamma) parameter vector [D].
+ * @param b   Device pointer to the shift (beta) parameter vector [D].
+ * @param wg  Device pointer to the scale gradient vector [D] (read-only).
+ * @param bg  Device pointer to the shift gradient vector [D] (read-only).
+ * @param D   Feature dimension size (total number of elements to update).
+ * @param lr  Learning rate scalar.
+ */
 template <typename DType> __global__ void layerNormUpdateKernel(
     DType* w,
     DType* b,

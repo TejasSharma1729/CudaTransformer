@@ -1,6 +1,8 @@
 #include "ModuleLayer.cu"
 #include "attention_qkv_kernels.cu"
 
+#include <array>
+
 #ifndef QKV_PROJECTION_LAYER
 #define QKV_PROJECTION_LAYER
 
@@ -61,6 +63,81 @@ template <typename DType = float> struct QKVProjectionLayer {
         cudaMemcpy(clonedLayer->weightsValue.get(), this->weightsValue.get(), projSize * sizeof(DType), cudaMemcpyDeviceToDevice);
         cudaMemcpy(clonedLayer->biasesValue.get(), this->biasesValue.get(), biasSize * sizeof(DType), cudaMemcpyDeviceToDevice);
         return clonedLayer;
+    }
+
+    /**
+     * @brief Computes Q, K, and V matrices from input.
+     * @param input The input tensor [batch, seq_len, inputDim].
+     * @return Array containing Q, K, V tensors.
+     */
+    std::array<Tensor<DType>, 3> computeQKV(const Tensor<DType>& input) {
+        int sequenceLength = input.shape()[input.nDim() - 2];
+        int batchSize = input.size() / (sequenceLength * inputDim);
+        std::vector<size_t> qkvShape = {(size_t)batchSize, (size_t)numHeads, (size_t)sequenceLength, (size_t)headDim};
+
+        Tensor<DType> queries(qkvShape), keys(qkvShape), values(qkvShape);
+        dim3 threadsPerBlock(BLOCKDIM, BLOCKDIM);
+        dim3 gridQKV((numHeads * headDim + BLOCKDIM - 1) / BLOCKDIM, (batchSize * sequenceLength + BLOCKDIM - 1) / BLOCKDIM);
+        
+        getQKVmatrices<DType><<<gridQKV, threadsPerBlock, 4 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
+            input.get(), queries.get(), weightsQuery.get(), biasesQuery.get(),
+            keys.get(), weightsKey.get(), biasesKey.get(),
+            values.get(), weightsValue.get(), biasesValue.get(),
+            inputDim, headDim, sequenceLength, numHeads, batchSize
+        );
+        
+        return {queries, keys, values};
+    }
+
+    /**
+     * @brief Backward pass for QKV projection layer.
+     * @param input The original input tensor.
+     * @param queryGrad Gradient w.r.t queries.
+     * @param keyGrad Gradient w.r.t keys.
+     * @param valueGrad Gradient w.r.t values.
+     * @return Gradient w.r.t input tensor.
+     */
+    Tensor<DType> computeBackward(
+        const Tensor<DType>& input, 
+        const Tensor<DType>& queryGrad, 
+        const Tensor<DType>& keyGrad, 
+        const Tensor<DType>& valueGrad
+    ) {
+        int sequenceLength = input.shape()[input.nDim() - 2];
+        int batchSize = input.size() / (sequenceLength * inputDim);
+
+        if (weightsQueryGrad == nullptr) {
+            int projSize = inputDim * headDim * numHeads;
+            int biasSize = headDim * numHeads;
+            weightsQueryGrad = cudaMakeShared<DType>(projSize);
+            biasesQueryGrad = cudaMakeShared<DType>(biasSize);
+            weightsKeyGrad = cudaMakeShared<DType>(projSize);
+            biasesKeyGrad = cudaMakeShared<DType>(biasSize);
+            weightsValueGrad = cudaMakeShared<DType>(projSize);
+            biasesValueGrad = cudaMakeShared<DType>(biasSize);
+        }
+
+        dim3 threadsPerBlock(BLOCKDIM, BLOCKDIM);
+        int totalInputDim = numHeads * headDim;
+        dim3 gridQKVWB((inputDim + BLOCKDIM - 1) / BLOCKDIM, (totalInputDim + BLOCKDIM - 1) / BLOCKDIM);
+
+        qkvBackwardWB<DType><<<gridQKVWB, threadsPerBlock, 4 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
+            input.get(), queryGrad.get(), weightsQueryGrad.get(), biasesQueryGrad.get(),
+            keyGrad.get(), weightsKeyGrad.get(), biasesKeyGrad.get(),
+            valueGrad.get(), weightsValueGrad.get(), biasesValueGrad.get(),
+            inputDim, headDim, sequenceLength, numHeads, batchSize
+        );
+
+        Tensor<DType> inputGrad(input.shape().toVector());
+        dim3 gridQKVInput((inputDim + BLOCKDIM - 1) / BLOCKDIM, (batchSize * sequenceLength + BLOCKDIM - 1) / BLOCKDIM);
+        
+        qkvBackward<DType><<<gridQKVInput, threadsPerBlock, 6 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
+            inputGrad.get(), queryGrad.get(), keyGrad.get(), valueGrad.get(),
+            weightsQuery.get(), weightsKey.get(), weightsValue.get(),
+            inputDim, headDim, sequenceLength, numHeads, batchSize
+        );
+
+        return inputGrad;
     }
 };
 

@@ -4,21 +4,35 @@
 #define TENSOR_KERNELS
 
 /**
- * @brief Fast memory-mapping kernel to access or update arbitrary Tensor slices.
- * 
- * Takes precomputed strides directly from the CPU Host to drastically avoid modulo-based 
- * divergence operations in thousands of CUDA threads.
- * 
- * @param tensor_data     The original tensor's massive buffer in global memory.
- * @param slice_data      The subset data buffer (to read from, or write to).
- * @param base_offset     The computed foundational offset mapping.
- * @param slice_shape     The geometric dimensions of the slice region itself.
- * @param tensor_strides  Precomputed bounds constraints on the active view region.
- * @param slice_actual_shape Fallback layout geometry handling data injection scaling. 
- * @param slice_nDim      Amount of dimensions directly constrained by the mathematical slicing.
- * @param actual_nDim     Amount of intrinsic topological dimensions establishing bounds.
- * @param total_elements  Absolute boundary scale used to aggressively govern out of bounds.
- * @param is_set          Boolean directing tensor data modification behavior (true implies push).
+ * @brief Read or write an arbitrary N-D slice of a tensor using precomputed strides.
+ *
+ * Maps each 1-D thread index to an N-D position in the slice, then translates it
+ * to a flat offset in the parent tensor using precomputed per-dimension strides
+ * (avoiding expensive in-kernel modulo chains on the full tensor shape).
+ *
+ * When is_set == 0 (get):  slice_data[i]             = tensor_data[tensor_offset]
+ * When is_set == 1 (set):  tensor_data[tensor_offset] = slice_data[slice_offset]
+ *   The set path computes slice_offset from the slice's own actual_shape to handle
+ *   broadcasting and stride-alignment between the source slice and the destination view.
+ *
+ * Grid:
+ *   gridDim.x = (total_elements + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param tensor_data       Device pointer to the parent tensor buffer; shape is arbitrary.
+ * @param slice_data        Device pointer to the slice buffer; flat size = total_elements.
+ * @param base_offset       Flat offset into tensor_data where the slice window begins.
+ * @param slice_shape       Logical shape of the slice (up to 8 dims); used for index decomposition.
+ * @param tensor_strides    Per-dimension strides of the parent tensor within the slice window;
+ *                          shape [slice_nDim].
+ * @param slice_actual_shape Actual shape of the slice_data buffer (may differ from slice_shape
+ *                           when broadcasting); shape [actual_nDim].
+ * @param slice_nDim        Number of dimensions in slice_shape / tensor_strides.
+ * @param actual_nDim       Number of dimensions in slice_actual_shape.
+ * @param total_elements    Total number of elements in the slice (product of slice_shape).
+ * @param is_set            0 = read slice from tensor; 1 = write slice into tensor.
  */
 template <typename DType>
 __global__ void sliceKernelFast(
@@ -68,13 +82,28 @@ __global__ void sliceKernelFast(
 }
 
 /**
- * @brief Memory translocation mapping to arbitrarily route tensor dimensions backward or forward.
- * 
- * @param src   Device memory source of the raw original tensor structure.
- * @param dst   Allocated device destination for geometrically re-projected memory maps.
- * @param shape Unmodified topological bounds block describing the pristine source data.
- * @param perm  Geometric ordering translation key dictating final absolute alignment.
- * @param nDim  Dimension size tracking variable necessary to perfectly bound permutations.
+ * @brief General N-D tensor transpose (axis permutation).
+ *
+ * Each thread handles one element.  Given the 1-D source index i, the kernel
+ * decomposes it into N-D source coordinates, applies the axis permutation perm,
+ * recomputes the destination flat offset in the permuted layout, and writes
+ * src[i] → dst[dst_offset].
+ *
+ * For a 2-D matrix this is a standard transpose; for higher-rank tensors it is
+ * a general axis permutation (equivalent to numpy.transpose or torch.permute).
+ *
+ * Grid:
+ *   gridDim.x = (total_elements + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param src   Device pointer (read);  flat layout following shape [shape[0], shape[1], ..., shape[nDim-1]].
+ * @param dst   Device pointer (write); flat layout following the permuted shape
+ *              [shape[perm[0]], shape[perm[1]], ..., shape[perm[nDim-1]]].
+ * @param shape Original per-dimension sizes of src; length nDim.
+ * @param perm  Permutation vector: dst axis j draws from src axis perm[j]; length nDim.
+ * @param nDim  Number of tensor dimensions (≤ 8).
  */
 template <typename DType>
 __global__ void transposeKernel(
@@ -125,12 +154,23 @@ __global__ void transposeKernel(
 }
 
 /**
- * @brief Executes scalar-to-scalar unary transformations instantly on natively driven GPU memory.
+ * @brief Device helper: applies a unary operator to a single scalar value.
+ *
+ * Supported operations (UnaryOp enum):
+ *   NEG  — negate (-a); for bool: logical NOT
+ *   NOT  — bitwise NOT for integral types; logical NOT otherwise
+ *   INV  — reciprocal (1/a)
+ *   EXP  — exp(a)
+ *   LOG  — log(a)
+ *   SQR  — a*a
+ *   SQRT — sqrt(a)
+ *
+ * @tparam DType Element data type.
+ * @param a  Input scalar.
+ * @param op Unary operation to apply.
+ * @return   Result scalar of the same type.
  */
 template <typename DType>
-/**
- * @brief Execute applyUnary operation.
- */
 __device__ DType applyUnary(DType a, UnaryOp op) {
     if constexpr (std::is_same_v<DType, bool>) {
         if (op == UnaryOp::NEG || op == UnaryOp::NOT) return !a;
@@ -152,12 +192,22 @@ __device__ DType applyUnary(DType a, UnaryOp op) {
 }
 
 /**
- * @brief Grid wrapper accelerating the parallel evaluation of mathematically pure unary operations.
+ * @brief Element-wise unary operation over a flat tensor buffer.
+ *
+ * Applies applyUnary(a[i], op) for every element in a flat array.
+ *
+ * Grid:
+ *   gridDim.x = (size + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param a    Device pointer (read);  flat buffer of length size.
+ * @param c    Device pointer (write); flat buffer of length size.
+ * @param size Total number of elements.
+ * @param op   Unary operation to apply (NEG, NOT, INV, EXP, LOG, SQR, SQRT).
  */
 template <typename DType>
-/**
- * @brief Execute unaryOpKernel operation.
- */
 __global__ void unaryOpKernel(const DType *a, DType *c, size_t size, UnaryOp op) {
     size_t idx = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -166,12 +216,26 @@ __global__ void unaryOpKernel(const DType *a, DType *c, size_t size, UnaryOp op)
 }
 
 /**
- * @brief Evaluates an inherent mathematical application for binary operations linking variables.
+ * @brief Device helper: applies a binary arithmetic operator to two scalar values.
+ *
+ * Supported operations (BinaryOp enum):
+ *   ADD — a + b
+ *   SUB — a - b
+ *   MUL — a * b
+ *   DIV — a / b
+ *   MOD — a % b (integral types only; returns 0 for floating-point)
+ *   POW — pow(a, b)
+ *   AND — a && b (logical)
+ *   OR  — a || b (logical)
+ *   XOR — a ^ b (integral) or (a != b) (floating-point)
+ *
+ * @tparam DType Element data type.
+ * @param a  Left operand.
+ * @param b  Right operand.
+ * @param op Binary operation to apply.
+ * @return   Result scalar of the same type.
  */
 template <typename DType>
-/**
- * @brief Execute applyBinary operation.
- */
 __device__ DType applyBinary(DType a, DType b, BinaryOp op) {
     switch (op) {
         case BinaryOp::ADD: return a + b;
@@ -195,13 +259,23 @@ __device__ DType applyBinary(DType a, DType b, BinaryOp op) {
 }
 
 /**
- * @brief Performs strict boolean logical execution mapping relationships accurately via truths.
- * @return Structurally guaranteed true or false mapping identical representations.
+ * @brief Device helper: evaluates a comparison predicate on two scalar values.
+ *
+ * Supported operations (BinaryOp enum):
+ *   EQ — a == b
+ *   NE — a != b
+ *   GT — a >  b
+ *   GE — a >= b
+ *   LT — a <  b
+ *   LE — a <= b
+ *
+ * @tparam DType Element data type.
+ * @param a  Left operand.
+ * @param b  Right operand.
+ * @param op Comparison operation to evaluate.
+ * @return   bool result of the comparison.
  */
 template <typename DType>
-/**
- * @brief Execute applyPredicate operation.
- */
 __device__ bool applyPredicate(DType a, DType b, BinaryOp op) {
     switch (op) {
         case BinaryOp::EQ: return a == b;
@@ -215,8 +289,27 @@ __device__ bool applyPredicate(DType a, DType b, BinaryOp op) {
 }
 
 /**
- * @brief Unifies logical predicate evaluation incorporating rigorous parallel execution geometries.
- * Guarantees result is injected purely into Boolean arrays regardless of original input DType.
+ * @brief Element-wise binary predicate over two broadcastable N-D tensors → bool output.
+ *
+ * For each output element c[i], decomposes the flat index into N-D coordinates using
+ * shapeC, then maps each coordinate back to flat offsets in a and b respecting
+ * broadcasting (a dimension of size 1 in shapeA/shapeB is broadcast).
+ *
+ * Grid:
+ *   gridDim.x = (sizeC + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Input element data type.
+ *
+ * @param a      Device pointer (read);  flat buffer shaped according to shapeA.
+ * @param b      Device pointer (read);  flat buffer shaped according to shapeB.
+ * @param c      Device pointer (write); flat bool buffer of length sizeC.
+ * @param nDim   Number of broadcast dimensions (≤ 8).
+ * @param shapeA Per-dimension sizes of a; size-1 dims are broadcast.
+ * @param shapeB Per-dimension sizes of b; size-1 dims are broadcast.
+ * @param shapeC Per-dimension sizes of c (broadcast-resolved output shape).
+ * @param op     Comparison operation (EQ, NE, GT, GE, LT, LE).
+ * @param sizeC  Total number of output elements (product of shapeC).
  */
 template <typename DType>
 __global__ void binaryPredicateOpKernel(
@@ -250,7 +343,26 @@ __global__ void binaryPredicateOpKernel(
 }
 
 /**
- * @brief Instantiates unified arithmetic sweeping incorporating dynamic topological broadcasting.
+ * @brief Element-wise binary arithmetic over two broadcastable N-D tensors.
+ *
+ * Same broadcasting logic as binaryPredicateOpKernel, but writes an arithmetic
+ * result of type DType instead of a bool.
+ *
+ * Grid:
+ *   gridDim.x = (sizeC + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param a      Device pointer (read);  flat buffer shaped according to shapeA.
+ * @param b      Device pointer (read);  flat buffer shaped according to shapeB.
+ * @param c      Device pointer (write); flat buffer of length sizeC.
+ * @param nDim   Number of broadcast dimensions (≤ 8).
+ * @param shapeA Per-dimension sizes of a; size-1 dims are broadcast.
+ * @param shapeB Per-dimension sizes of b; size-1 dims are broadcast.
+ * @param shapeC Per-dimension sizes of c (broadcast-resolved output shape).
+ * @param op     Binary arithmetic operation (ADD, SUB, MUL, DIV, MOD, POW, AND, OR, XOR).
+ * @param sizeC  Total number of output elements (product of shapeC).
  */
 template <typename DType>
 __global__ void binaryOpKernel(
@@ -284,7 +396,23 @@ __global__ void binaryOpKernel(
 }
 
 /**
- * @brief Sweeps a standalone scalar mathematical arithmetic operation universally across kernels.
+ * @brief Element-wise binary arithmetic between a tensor and a scalar.
+ *
+ * Applies applyBinary(a[i], b, op) or applyBinary(b, a[i], op) depending on
+ * scalar_on_left, allowing both left-scalar (b OP a[i]) and right-scalar (a[i] OP b).
+ *
+ * Grid:
+ *   gridDim.x = (size + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param a              Device pointer (read);  flat buffer of length size.
+ * @param b              Scalar value.
+ * @param c              Device pointer (write); flat buffer of length size.
+ * @param size           Total number of elements.
+ * @param op             Binary arithmetic operation.
+ * @param scalar_on_left 1 → compute b OP a[i];  0 → compute a[i] OP b.
  */
 template <typename DType>
 __global__ void binaryScalarOpKernel(
@@ -306,7 +434,23 @@ __global__ void binaryScalarOpKernel(
 }
 
 /**
- * @brief Scans standalone scalars evaluating logical comparison expressions inherently to bool logic.
+ * @brief Element-wise comparison predicate between a tensor and a scalar → bool output.
+ *
+ * Applies applyPredicate(a[i], b, op) or applyPredicate(b, a[i], op) depending on
+ * scalar_on_left.
+ *
+ * Grid:
+ *   gridDim.x = (size + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param a              Device pointer (read);  flat buffer of length size.
+ * @param b              Scalar value to compare against.
+ * @param c              Device pointer (write); flat bool buffer of length size.
+ * @param size           Total number of elements.
+ * @param op             Comparison operation (EQ, NE, GT, GE, LT, LE).
+ * @param scalar_on_left 1 → evaluate b OP a[i];  0 → evaluate a[i] OP b.
  */
 template <typename DType>
 __global__ void binaryScalarPredicateOpKernel(
@@ -328,7 +472,29 @@ __global__ void binaryScalarPredicateOpKernel(
 }
 
 /**
- * @brief Calculates the Kronecker tensor product geometrically linking inherently huge hierarchies.
+ * @brief Computes the Kronecker (tensor) product of two N-D tensors.
+ *
+ * For output index i, decomposes into N-D coordinates v using shapeC, then:
+ *   offA += (v[dim] / shapeB[dim]) * strideA[dim]   — selects the block in A
+ *   offB += (v[dim] % shapeB[dim]) * strideB[dim]   — selects the element within that block
+ *   c[i] = a[offA] * b[offB]
+ *
+ * shapeC[dim] == shapeA[dim] * shapeB[dim] for every dimension.
+ *
+ * Grid:
+ *   gridDim.x = (sizeC + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param a      Device pointer (read);  shape described by shapeA; flat size = product(shapeA).
+ * @param b      Device pointer (read);  shape described by shapeB; flat size = product(shapeB).
+ * @param c      Device pointer (write); shape described by shapeC; flat size = sizeC.
+ * @param shapeA Per-dimension sizes of a (length nDim).
+ * @param shapeB Per-dimension sizes of b (length nDim).
+ * @param shapeC Per-dimension sizes of c = shapeA * shapeB element-wise (length nDim).
+ * @param nDim   Number of tensor dimensions (≤ 8).
+ * @param sizeC  Total number of output elements (product of shapeC).
  */
 template <typename DType>
 __global__ void kronKernel(
@@ -361,7 +527,40 @@ __global__ void kronKernel(
 }
 
 /**
- * @brief Aggregation mappings rigorously capturing deep sums, means, and normal distributions.
+ * @brief General N-D reduction along one or more axes of a tensor.
+ *
+ * Each output element dst[i] is the reduction of all source elements whose N-D
+ * indices match the N-D index of dst[i] on the non-reduced axes.  The mapping
+ * array encodes which destination dimension each source dimension maps to
+ * (mapping[srcDim] == -1 means that dimension is being reduced away).
+ *
+ * Supported reduction operations (ReductionOp enum):
+ *   SUM     — Σ values
+ *   MEAN    — Σ values / count
+ *   MAX     — maximum value
+ *   MIN     — minimum value
+ *   NORM_L1 — Σ |value|
+ *   NORM_L2 — √(Σ value²)
+ *
+ * Note: this is a simple reference kernel (one thread per output element, full
+ * source scan per thread) and is not optimised for large reductions.
+ *
+ * Grid:
+ *   gridDim.x = (sizeDst + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param src      Device pointer (read);  flat buffer; logical shape shapeSrc.
+ * @param dst      Device pointer (write); flat buffer of length sizeDst; logical shape shapeDst.
+ * @param mapping  For each source dimension, the index of the corresponding destination
+ *                 dimension, or (size_t)-1 if that source dimension is reduced.  Length nDimSrc.
+ * @param shapeSrc Per-dimension sizes of src (length nDimSrc).
+ * @param shapeDst Per-dimension sizes of dst (length nDimDst).
+ * @param nDimSrc  Number of dimensions in src.
+ * @param nDimDst  Number of dimensions in dst.
+ * @param sizeDst  Total number of output elements (product of shapeDst).
+ * @param op       Reduction operation to apply.
  */
 template <typename DType>
 __global__ void reduceKernel(
@@ -436,8 +635,31 @@ __global__ void reduceKernel(
 }
 
 /**
- * @brief Secure general-purpose Matrix Multiplication directly evaluating unbatched RHS flows. 
- * Formidably prevents memory out-of-bounds crashes during generic tensor vector mappings.
+ * @brief Batched matrix multiplication: C[b] = A[b] × B[b] (or B[0] when batchSizeB == 1).
+ *
+ * Computes C[b, m, n] = Σ_k A[b, m, k] * B[b_real, k, n], where b_real = b when
+ * batchSizeB > 1 or 0 when batchSizeB == 1 (broadcast the single B matrix over all
+ * batch elements in A).
+ *
+ * Each thread handles one output element identified by its flat index into C.
+ * This is a naïve (non-tiled) implementation; suitable for small matmuls or as a
+ * fallback.
+ *
+ * Grid:
+ *   gridDim.x = (batchSize * M * N + blockDim.x - 1) / blockDim.x
+ * Block: (blockDim.x)  —  typically 256
+ *
+ * @tparam DType Element data type.
+ *
+ * @param a         Device pointer (read);  shape [batchSize, M, K].
+ * @param b         Device pointer (read);  shape [batchSizeB, K, N].
+ *                  When batchSizeB == 1 the single matrix is broadcast.
+ * @param c         Device pointer (write); shape [batchSize, M, N].
+ * @param M         Number of rows in each output matrix.
+ * @param K         Shared (contracted) dimension.
+ * @param N         Number of columns in each output matrix.
+ * @param batchSize Number of matrices in a (and c).
+ * @param batchSizeB Number of matrices in b; pass 1 to broadcast a single B.
  */
 template <typename DType>
 __global__ void matmulKernel(

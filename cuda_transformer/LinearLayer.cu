@@ -10,12 +10,12 @@
  * @tparam DType The data type used for parameters and computations.
  */
 template <typename DType = float> struct LinearLayer : public Layer<DType> {
-    std::shared_ptr<DType[]> weights = nullptr;      ///< Weight matrix [outputDim, inputDim].
+    std::shared_ptr<DType[]> weights = nullptr;      /// Weight matrix [outputDim, inputDim].
     std::shared_ptr<DType[]> weightGrad = nullptr; ///< Accumulated grad for weights.
-    std::shared_ptr<DType[]> biases = nullptr;       ///< Bias vector [outputDim].
-    std::shared_ptr<DType[]> biasGrad = nullptr;  ///< Accumulated grad for biases.
-    int inputDim = 1;  ///< Size of the input feature space.
-    int outputDim = 1; ///< Size of the output feature space.
+    std::shared_ptr<DType[]> biases = nullptr;       /// Bias vector [outputDim].
+    std::shared_ptr<DType[]> biasGrad = nullptr;  /// Accumulated grad for biases.
+    int inputDim = 1;  /// Size of the input feature space.
+    int outputDim = 1; /// Size of the output feature space.
     
     /**
      * @brief Constructs a LinearLayer with specified dims.

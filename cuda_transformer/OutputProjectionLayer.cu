@@ -46,6 +46,7 @@ template <typename DType = float> struct OutputProjectionLayer {
     /**
      * @brief Forward pass: project attention output.
      * @param input Attention output [batch, seq_len, head_dim * num_heads].
+     * @param saveStates Flag to save states (unused here as no states are saved).
      * @return Projected output [batch, seq_len, input_dim].
      */
     Tensor<DType> forward(Tensor<DType> input) {

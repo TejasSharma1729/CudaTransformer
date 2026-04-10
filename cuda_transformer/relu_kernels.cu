@@ -4,13 +4,24 @@
 #define RELU_KERNELS
 
 /**
- * @brief Forward pass for the ReLU activation function.
- * 
- * @tparam DType The data type for computations.
- * @param input Pointer to input data.
- * @param output Pointer to output data.
- * @param inputDim Size of the feature dim.
- * @param totalBatchSize Total number of elements across all batches.
+ * @brief Forward pass for the ReLU activation: output[i] = max(0, input[i]).
+ *
+ * Each thread handles one element; blockIdx.y selects the row (batch/sequence
+ * position) and threadIdx.x + blockIdx.x*blockDim.x selects the feature column.
+ *
+ * Grid:
+ *   gridDim.x = (inputDim       + blockDim.x - 1) / blockDim.x  — feature tiles
+ *   gridDim.y = totalBatchSize                                   — one block row per sample
+ * Block: (blockDim.x, 1)  —  typically (256, 1)
+ *
+ * No shared memory used.
+ *
+ * @tparam DType Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param input          Device pointer (read);  shape [totalBatchSize, inputDim].
+ * @param output         Device pointer (write); shape [totalBatchSize, inputDim].
+ * @param inputDim       Number of features per sample (last dimension).
+ * @param totalBatchSize Number of rows (batchSize * sequenceLength, or just batchSize).
  */
 template <typename DType = float> __global__ void reluForward(
     const DType *input,
@@ -27,14 +38,26 @@ template <typename DType = float> __global__ void reluForward(
 }
 
 /**
- * @brief Backward pass for the ReLU activation function.
- * 
- * @tparam DType The data type for computations.
- * @param input Original input data.
- * @param gradInput Pointer to accumulate input grad.
- * @param gradOutput Grad with respect to the output.
- * @param inputDim Size of the feature dim.
- * @param totalBatchSize Total number of elements across all batches.
+ * @brief Backward pass for the ReLU activation.
+ *
+ * Computes dL/dinput[i] += gradOutput[i] if input[i] > 0, else 0.
+ * Uses accumulation (+=) so the caller must zero gradInput before the first call
+ * if it is shared across multiple upstream branches.
+ *
+ * Grid / Block: identical to reluForward.
+ *   gridDim.x = (inputDim + blockDim.x - 1) / blockDim.x
+ *   gridDim.y = totalBatchSize
+ * Block: (blockDim.x, 1)  —  typically (256, 1)
+ *
+ * @tparam DType Floating-point data type.
+ *
+ * @param input          Device pointer (read);       shape [totalBatchSize, inputDim].
+ *                       Original forward-pass input; used as the ReLU mask.
+ * @param gradInput      Device pointer (accumulate); shape [totalBatchSize, inputDim].
+ * @param gradOutput     Device pointer (read);       shape [totalBatchSize, inputDim].
+ *                       Upstream gradient dL/d(output).
+ * @param inputDim       Number of features per sample.
+ * @param totalBatchSize Number of rows.
  */
 template <typename DType = float> __global__ void reluBackward(
     const DType *input,

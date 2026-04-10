@@ -58,22 +58,37 @@ template <typename DType = float> struct TransformerBlockLayer : public Layer<DT
 
     /** @brief Forward pass. */
     Tensor<DType> forward(Tensor<DType> input) override {
-        input = firstNorm->forward(input);
-        input = attention->forward(input);
-        input = secondNorm->forward(input);
-        input = mlp->forward(input);
-        return input;
+        Tensor<DType> normed = firstNorm->forward(input);
+        Tensor<DType> attn = attention->forward(normed);
+        Tensor<DType> normed2 = secondNorm->forward(attn);
+        Tensor<DType> out = mlp->forward(normed2);
+        return out;
     }
 
     /** @brief Backward pass. */
     Tensor<DType> backward(Tensor<DType> input, Tensor<DType> gradOutput) override {
         Tensor<DType> firstActivation = firstNorm->forward(input);
-        Tensor<DType> intermediateActivation = attention->forward(input);
+        
+        // Pass states reference to attention forward to cache Q, K, V, and flash attention output
+        Tensor<DType>* states = new Tensor<DType>[4];
+        auto attentionLayer = std::static_pointer_cast<AttentionLayer<DType>>(attention);
+        Tensor<DType> intermediateActivation = attentionLayer->forward(firstActivation, states);
+
         Tensor<DType> secondActivation = secondNorm->forward(intermediateActivation);
-        Tensor<DType> propagatedGrad = mlp->backward(intermediateActivation, gradOutput);
-        propagatedGrad = secondNorm->backward(secondActivation, propagatedGrad);
-        propagatedGrad = attention->backward(input, propagatedGrad);
+
+        // Backward pass through MLP
+        Tensor<DType> propagatedGrad = mlp->backward(secondActivation, gradOutput);
+        
+        // Backward pass through second LayerNorm
+        propagatedGrad = secondNorm->backward(intermediateActivation, propagatedGrad);
+        
+        // Backward pass through Attention using cached states
+        propagatedGrad = attentionLayer->backward(firstActivation, propagatedGrad, states);
+        
+        // Backward pass through first LayerNorm
         propagatedGrad = firstNorm->backward(input, propagatedGrad);
+        
+        delete[] states;
         return propagatedGrad;
     }
 
@@ -130,7 +145,10 @@ template <typename DType = float> struct TransformerBlockLayer : public Layer<DT
     }
 
     /**
-     * @brief Execute setParameters operation.
+     * @brief Sets parameters for attention and MLP sub-modules from the provided map.
+     * Only keys with the correct prefixes ("attention.", "mlp.", "firstNorm.", "secondNorm.") are used; others are ignored.
+     * @param params Map of parameter names to Tensors. Expected keys are prefixed with the sub-module name 
+     *      (e.g., "attention.weights", "mlp.layer_0.weights").
      */
     void setParameters(const std::map<std::string, Tensor<DType>>& params) override {
         std::map<std::string, Tensor<DType>> attnParams, mlpParams, firstNormParams, secondNormParams;

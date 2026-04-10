@@ -4,6 +4,25 @@
 #define EMBEDDING_KERNELS
 
 
+/**
+ * @brief Gathers embedding vectors from the embedding matrix for each token ID in the input.
+ *
+ * Each thread block covers one position in the flattened batch×sequence dimension (`batchIdx`)
+ * and one tile of the embedding dimension (`featureIdx`).  Out-of-range token IDs are mapped
+ * to the zero vector so the output is always safe to read.
+ *
+ * Grid:  ((embeddingDim + BLOCKDIM - 1) / BLOCKDIM, totalBatchSize)
+ * Block: (BLOCKDIM)
+ *
+ * @tparam DType   Data type of the embedding vectors (e.g. float, __half).
+ * @tparam IdType  Integer type used for token IDs (e.g. int).
+ * @param input           Device pointer to flattened token ID array [totalBatchSize].
+ * @param output          Device pointer to the output embedding tensor [totalBatchSize, embeddingDim].
+ * @param embeddingMatrix Device pointer to the embedding table [vocabSize, embeddingDim].
+ * @param vocabSize       Total number of tokens in the vocabulary.
+ * @param embeddingDim    Dimensionality of each embedding vector.
+ * @param totalBatchSize  Product of batchSize and sequenceLength (flattened token count).
+ */
 template <typename DType = float, typename IdType = int> __global__ void tokenEmbeddingForwardKernel(
     const IdType* input,
     DType* output,
@@ -24,6 +43,24 @@ template <typename DType = float, typename IdType = int> __global__ void tokenEm
     }
 }
 
+/**
+ * @brief Broadcasts learned positional embedding vectors into the output tensor.
+ *
+ * Each position `batchIdx` in the flattened sequence dimension receives its corresponding
+ * row from the positional embedding table.  The actual token IDs (`input`) are ignored;
+ * only the position index (`batchIdx`) is used, so the kernel is the same for every batch.
+ *
+ * Grid:  ((embeddingDim + BLOCKDIM - 1) / BLOCKDIM, totalBatchSize)
+ * Block: (BLOCKDIM)
+ *
+ * @tparam DType   Data type of the embedding vectors (e.g. float, __half).
+ * @tparam IdType  Integer type of the token ID array (unused in this kernel beyond shape).
+ * @param input           Device pointer to flattened token ID array [totalBatchSize] (shape only).
+ * @param output          Device pointer to the output tensor [totalBatchSize, embeddingDim].
+ * @param embeddingMatrix Device pointer to the positional embedding table [blockSize, embeddingDim].
+ * @param embeddingDim    Dimensionality of each positional embedding vector.
+ * @param totalBatchSize  Product of batchSize and sequenceLength (flattened position count).
+ */
 template <typename DType = float, typename IdType = int> __global__ void positionEmbeddingForwardKernel(
     const IdType* input,
     DType* output,
@@ -38,6 +75,26 @@ template <typename DType = float, typename IdType = int> __global__ void positio
     }
 }
 
+/**
+ * @brief Scatter-accumulates output gradients into the token embedding gradient matrix.
+ *
+ * For each position in the batch, the gradient w.r.t. the output embedding at that position
+ * is atomically added into the row of `gradEmbeddingMatrix` corresponding to the token ID.
+ * Out-of-range token IDs are silently ignored.
+ *
+ * Grid:  ((embeddingDim + BLOCKDIM - 1) / BLOCKDIM, totalBatchSize)
+ * Block: (BLOCKDIM)
+ *
+ * @tparam DType   Data type of the gradients and embedding table (e.g. float, __half).
+ * @tparam IdType  Integer type used for token IDs (e.g. int).
+ * @param input               Device pointer to flattened token ID array [totalBatchSize].
+ * @param gradOutput          Device pointer to upstream gradients [totalBatchSize, embeddingDim].
+ * @param gradEmbeddingMatrix Device pointer to the gradient accumulator [vocabSize, embeddingDim].
+ *                            Updated via atomicAdd (safe for concurrent writes from same token).
+ * @param vocabSize           Total number of tokens in the vocabulary.
+ * @param embeddingDim        Dimensionality of each embedding vector.
+ * @param totalBatchSize      Product of batchSize and sequenceLength.
+ */
 template <typename DType = float, typename IdType = int> __global__ void tokenEmbeddingBackwardKernel(
     const IdType* input,
     const DType* gradOutput,
@@ -56,6 +113,25 @@ template <typename DType = float, typename IdType = int> __global__ void tokenEm
     }
 }
 
+/**
+ * @brief Accumulates output gradients into the positional embedding gradient matrix.
+ *
+ * The gradient for position `batchIdx` in the flattened sequence is atomically added into
+ * the corresponding row of `gradEmbeddingMatrix`.  Unlike the token-embedding backward,
+ * the row index equals the flattened position index directly (not a gathered token ID).
+ *
+ * Grid:  ((embeddingDim + BLOCKDIM - 1) / BLOCKDIM, totalBatchSize)
+ * Block: (BLOCKDIM)
+ *
+ * @tparam DType   Data type of the gradients and embedding table (e.g. float, __half).
+ * @tparam IdType  Integer type of the token ID array (shape only; values unused).
+ * @param input               Device pointer to flattened token ID array [totalBatchSize] (unused).
+ * @param gradOutput          Device pointer to upstream gradients [totalBatchSize, embeddingDim].
+ * @param gradEmbeddingMatrix Device pointer to the gradient accumulator [blockSize, embeddingDim].
+ *                            Updated via atomicAdd.
+ * @param embeddingDim        Dimensionality of each positional embedding vector.
+ * @param totalBatchSize      Product of batchSize and sequenceLength.
+ */
 template <typename DType = float, typename IdType = int> __global__ void positionEmbeddingBackwardKernel(
     const IdType* input,
     const DType* gradOutput,
@@ -71,88 +147,5 @@ template <typename DType = float, typename IdType = int> __global__ void positio
 }
 
 // unembedding == just a linear layer.
-
-template <typename DType = float> __global__ void softmaxKernel(
-    const DType* input,
-    DType* output,
-    int embeddingDim,
-    int totalBatchSize,
-    DType temperature = (DType)1.0,
-    bool logSoftmax = false
-) {
-    int batchIdx = blockIdx.x * blockDim.x + threadIdx.x; // one thread per feature
-    if (batchIdx >= totalBatchSize) {
-        return;
-    }
-    DType maxVal;
-    if constexpr (std::is_same_v<DType, half>) {
-        maxVal = -1e4;
-    } else if constexpr (std::is_same_v<DType, double>) {
-        maxVal = -1e10;
-    }
-    for (int i = 0; i < embeddingDim; i++) {
-        DType val = input[batchIdx * embeddingDim + i];
-        if (val > maxVal) maxVal = val;
-    }
-    DType sumExp = 0;
-    for (int i = 0; i < embeddingDim; i++) {
-        DType expVal = (DType)exp((double)((input[batchIdx * embeddingDim + i] - maxVal) / temperature));
-        sumExp += expVal;
-    }
-
-    for (int i = 0; i < embeddingDim; i++) {
-        DType expVal = (DType)exp((double)((input[batchIdx * embeddingDim + i] - maxVal) / temperature));
-        if (logSoftmax) {
-            output[batchIdx * embeddingDim + i] = input[batchIdx * embeddingDim + i] - maxVal - (DType)log((double)sumExp);
-        } else {
-            output[batchIdx * embeddingDim + i] = expVal / sumExp;
-        }
-    }
-}
-
-template <typename DType = float, typename IdType = int> __global__ void crossEntropyLossKernel(
-    const DType* input,
-    const IdType* target,
-    DType* lossOutput,
-    DType* inputGrad,
-    int embeddingDim,
-    int totalBatchSize,
-    DType temperature = (DType)1.0,
-    bool logSoftmax = false
-) {
-    int batchIdx = blockIdx.x * blockDim.x + threadIdx.x; // one thread per feature
-    if (batchIdx >= totalBatchSize) {
-        return;
-    }
-    int targetId = (int)target[batchIdx];
-    if (targetId < 0 || targetId >= embeddingDim) {
-        if (lossOutput != nullptr) {
-            lossOutput[batchIdx] = (DType)0;
-        }
-        return;
-    }
-    int fullIdx = batchIdx * embeddingDim + targetId;
-    double val = (double)input[fullIdx];
-    if (lossOutput != nullptr) {
-        if (logSoftmax) {
-            lossOutput[batchIdx] = (DType)(-val);
-            val = (DType)exp((double)val);
-        } else {
-            lossOutput[batchIdx] = (DType)(-log((double)val));
-        }
-    }
-    
-    if (inputGrad == nullptr) {
-        return;
-    }
-    for (int i = 0; i < targetId; i++) {
-        inputGrad[batchIdx * embeddingDim + i] = input[batchIdx * embeddingDim + i] / temperature;
-    }
-    inputGrad[fullIdx] = (DType)((val - 1.0) / (double)temperature);
-    for (int i = targetId + 1; i < embeddingDim; i++) {
-        inputGrad[batchIdx * embeddingDim + i] = input[batchIdx * embeddingDim + i] / temperature;
-    }
-}
-
 
 #endif // EMBEDDING_KERNELS

@@ -28,8 +28,7 @@ template <typename DType = float> struct FlashAttentionLayer {
      */
     FlashAttentionLayer(int headDim, int numHeads)
         : headDim(headDim), numHeads(numHeads)
-    {
-    }
+    { }
 
     /** @brief Clone the flash attention layer. */
     std::shared_ptr<FlashAttentionLayer<DType>> clone() const {
@@ -43,63 +42,103 @@ template <typename DType = float> struct FlashAttentionLayer {
      * @param values [batch, num_heads, seq_len, head_dim]
      * @return Attention output [batch, num_heads, seq_len, head_dim]
      */
-    Tensor<DType> computeAttention(const Tensor<DType> &queries, const Tensor<DType> &keys, const Tensor<DType> &values) {
+    Tensor<DType> computeAttention(
+        const Tensor<DType> &queries,
+        const Tensor<DType> &keys,
+        const Tensor<DType> &values,
+        bool saveStates = false
+    ) {
         int batchSize = queries.shape()[0];
         int sequenceLength = queries.shape()[2];
         std::vector<size_t> outputShape = queries.shape().toVector();
         Tensor<DType> output(outputShape);
 
-        // Cache max scores and denominators for backward
-        cachedMaxScores = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
-        cachedDenominators = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
-        cachedOutput = cudaMakeShared<DType>(output.size());
-        cachedBatchSize = batchSize;
-        cachedSequenceLength = sequenceLength;
+        std::shared_ptr<DType[]> maxScores = nullptr;
+        std::shared_ptr<DType[]> denominators = nullptr;
+
+        if (saveStates) {
+            // Cache max scores and denominators for backward
+            cachedMaxScores = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
+            cachedDenominators = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
+            cachedOutput = cudaMakeShared<DType>(output.size());
+            cachedBatchSize = batchSize;
+            cachedSequenceLength = sequenceLength;
+            maxScores = cachedMaxScores;
+            denominators = cachedDenominators;
+        } else {
+            maxScores = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
+            denominators = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
+        }
 
         dim3 gridAtt((sequenceLength + BLOCKDIM - 1) / BLOCKDIM, numHeads, batchSize);
         dim3 blockAtt(BLOCKDIM, BLOCKDIM);
         size_t sharedMemSize = BLOCKDIM * (BLOCKDIM + 3 * headDim) * sizeof(DType);
         flashAttention<DType><<<gridAtt, blockAtt, sharedMemSize>>>(
             queries.get(), keys.get(), values.get(), output.get(),
-            cachedMaxScores.get(), cachedDenominators.get(), headDim, sequenceLength, numHeads, batchSize
+            maxScores.get(), denominators.get(), headDim, sequenceLength, numHeads, batchSize
         );
 
-        // Also cache output for backward
-        cudaMemcpy(cachedOutput.get(), output.get(), output.size() * sizeof(DType), cudaMemcpyDeviceToDevice);
+        if (saveStates) {
+            // Also cache output for backward
+            cudaMemcpy(cachedOutput.get(), output.get(), output.size() * sizeof(DType), cudaMemcpyDeviceToDevice);
+        }
 
         return output;
     }
 
     /**
      * @brief Backward: compute gradients using cached values.
+     * @param queries [batch, num_heads, seq_len, head_dim]
+     * @param keys [batch, num_heads, seq_len, head_dim]
+     * @param values [batch, num_heads, seq_len, head_dim]
+     * @param outputGrad [batch, num_heads, seq_len, head_dim] Gradient
      * @return Tuple of gradient tensors: [queryGrad, keyGrad, valueGrad]
      */
-    void computeBackward(
-        const Tensor<DType> &queries, Tensor<DType> &queryGrad,
-        const Tensor<DType> &keys, Tensor<DType> &keyGrad,
-        const Tensor<DType> &values, Tensor<DType> &valueGrad,
+    std::array<Tensor<DType>, 3> computeBackward(
+        const Tensor<DType> &queries,
+        const Tensor<DType> &keys,
+        const Tensor<DType> &values,
         const Tensor<DType> &outputGrad
     ) {
-        if (cachedMaxScores == nullptr || cachedDenominators == nullptr) {
-            // Forward was not called or cache was cleared
-            return;
-        }
+        std::array<Tensor<DType>, 3> grads;
+        grads[0] = Tensor<DType>(queries.shape().toVector());
+        grads[1] = Tensor<DType>(keys.shape().toVector());
+        grads[2] = Tensor<DType>(values.shape().toVector());
+        int batchSize = queries.shape()[0];
+        int sequenceLength = queries.shape()[2];
+        
+        std::shared_ptr<DType[]> maxScores = cachedMaxScores;
+        std::shared_ptr<DType[]> denominators = cachedDenominators;
+        std::shared_ptr<DType[]> output = cachedOutput;
 
-        int batchSize = cachedBatchSize;
-        int sequenceLength = cachedSequenceLength;
+        if (maxScores == nullptr || denominators == nullptr || output == nullptr) {
+            // Forward was not called with saveStates=true, so recompute forward to get states
+            maxScores = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
+            denominators = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength);
+            output = cudaMakeShared<DType>(batchSize * numHeads * sequenceLength * headDim);
+            
+            dim3 gridAtt((sequenceLength + BLOCKDIM - 1) / BLOCKDIM, numHeads, batchSize);
+            dim3 blockAtt(BLOCKDIM, BLOCKDIM);
+            size_t sharedMemSize = BLOCKDIM * (BLOCKDIM + 3 * headDim) * sizeof(DType);
+            flashAttention<DType><<<gridAtt, blockAtt, sharedMemSize>>>(
+                queries.get(), keys.get(), values.get(), output.get(),
+                maxScores.get(), denominators.get(), headDim, sequenceLength, numHeads, batchSize
+            );
+        }
 
         dim3 gridAtt((sequenceLength + BLOCKDIM - 1) / BLOCKDIM, numHeads, batchSize);
         dim3 blockAtt(BLOCKDIM, BLOCKDIM);
         size_t sharedMemSize = (5 * headDim * BLOCKDIM + 2 * BLOCKDIM * BLOCKDIM) * sizeof(DType);
 
         flashAttentionBackward<DType><<<gridAtt, blockAtt, sharedMemSize>>>(
-            queries.get(), queryGrad.get(),
-            keys.get(), keyGrad.get(),
-            values.get(), valueGrad.get(),
-            cachedOutput.get(), outputGrad.get(),
-            cachedMaxScores.get(), cachedDenominators.get(),
+            queries.get(), grads[0].data(),
+            keys.get(), grads[1].data(),
+            values.get(), grads[2].data(),
+            output.get(), outputGrad.get(),
+            maxScores.get(), denominators.get(),
             headDim, sequenceLength, numHeads, batchSize
         );
+        return grads;
     }
 
     /** @brief Clear cached values to free memory. */

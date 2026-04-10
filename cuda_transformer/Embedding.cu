@@ -5,13 +5,27 @@
 #ifndef EMBEDDING_LAYER
 #define EMBEDDING_LAYER
 
+/**
+ * @brief Represents the token embedding layer that maps input token IDs to dense vectors.
+ * @tparam DType The data type used for the embedding vectors (e.g., float).
+ * @tparam IdType The data type used for token IDs (e.g., int).
+ * The embedding layer maintains an embedding matrix of shape (vocabSize, embeddingDim) where 
+ * each row corresponds to the embedding vector for a specific token ID. 
+ * The forward pass retrieves the embedding vectors for the input token IDs, 
+ * while the backward pass accumulates gradients for the embedding matrix based on the output gradients.
+ */
 template <typename DType = float, typename IdType = int>
 struct TokenEmbedding {
-    std::shared_ptr<DType[]> embeddingMatrix; ///< Embedding matrix of shape (vocabSize, embeddingDim).
-    std::shared_ptr<DType[]> gradEmbeddingMatrix; ///< Gradient accumulator for embedding matrix.
-    int vocabSize; ///< Size of the vocabulary.
-    int embeddingDim; ///< Dimensionality of the embeddings.
+    std::shared_ptr<DType[]> embeddingMatrix; /// Embedding matrix of shape (vocabSize, embeddingDim).
+    std::shared_ptr<DType[]> gradEmbeddingMatrix; /// Gradient accumulator for embedding matrix.
+    int vocabSize; /// Size of the vocabulary.
+    int embeddingDim; /// Dimensionality of the embeddings.
 
+    /**
+     * @brief Constructor that initializes the embedding matrix and its gradient accumulator.
+     * @param vocabSize The size of the vocabulary (number of unique tokens).
+     * @param embeddingDim The dimensionality of the embedding vectors.
+     */
     TokenEmbedding(int vocabSize, int embeddingDim) 
         : vocabSize(vocabSize), embeddingDim(embeddingDim) 
     {
@@ -20,7 +34,10 @@ struct TokenEmbedding {
     }
 
     /**
-     * @brief Execute forward operation.
+     * @brief The forward pass that takes a tensor of token IDs and returns the corresponding embeddings.
+     * @param input A tensor of shape (batchSize, sequenceLength) containing token IDs.
+     * @return A tensor of shape (batchSize, sequenceLength, embeddingDim) containing the
+     * embedding vectors corresponding to the input token IDs. 
      */
     Tensor<DType> forward(Tensor<IdType> input) {
         std::vector<size_t> os = input.shape().toVector();
@@ -42,14 +59,21 @@ struct TokenEmbedding {
     }
 
     /**
-     * @brief Execute operator() operation.
+     * @brief Forward operator that allows the embedding layer to be called like a function.
+     * @param input A tensor of shape (batchSize, sequenceLength) containing token IDs.
+     * @return A tensor of shape (batchSize, sequenceLength, embeddingDim) containing the
+     * embedding vectors corresponding to the input token IDs.
      */
     Tensor<DType> operator()(Tensor<IdType> input) {
         return forward(input);
     }
 
     /**
-     * @brief Execute backward operation.
+     * @brief Backward pass that takes the input token IDs and the gradient of the loss with respect to the output embeddings,
+     * and accumulates the gradients for the embedding matrix.
+     * @param input A tensor of shape (batchSize, sequenceLength) containing token IDs that were used in the forward pass.
+     * @param gradOutput A tensor of shape (batchSize, sequenceLength, embeddingDim) containing the 
+     *      gradient of the loss with respect to the output embeddings
      */
     void backward(Tensor<IdType> input, Tensor<DType> gradOutput) {
         int totalBatchSize = gradOutput.size() / embeddingDim;
@@ -67,26 +91,27 @@ struct TokenEmbedding {
     }
 
     /**
-     * @brief Execute clone operation.
+     * @brief Creates a deep copy of the TokenEmbedding instance, 
+     * including copying the embedding matrix to the new instance.
      */
     TokenEmbedding clone() {
-        /**
-         * @brief Execute copy operation.
-         */
         TokenEmbedding copy(vocabSize, embeddingDim);
         cudaMemcpy(copy.embeddingMatrix.get(), embeddingMatrix.get(), vocabSize * embeddingDim * sizeof(DType), cudaMemcpyDeviceToDevice);
         return copy;
     }
 
     /**
-     * @brief Execute zeroGrad operation.
+     * @brief Zeros out the gradients in the gradEmbeddingMatrix, 
+     * preparing it for the next backward pass.
      */
     void zeroGrad() {
         cudaMemset(gradEmbeddingMatrix.get(), 0, vocabSize * embeddingDim * sizeof(DType));
     }
 
     /**
-     * @brief Execute sgdUpdate operation.
+     * @brief Performs an SGD update on the embedding matrix using the 
+     * accumulated gradients in gradEmbeddingMatrix and the specified learning rate.
+     * @param lr The learning rate to use for the SGD update.
      */
     void sgdUpdate(DType lr) {
         int totalSize = vocabSize * embeddingDim;
@@ -102,21 +127,28 @@ struct TokenEmbedding {
     }
 
     /**
-     * @brief Execute getParameters operation.
+     * @brief Returns a Tensor that shares the same underlying embedding matrix data.
+     * This allows external code to access the embedding parameters for inspection, saving, or custom updates.
+     * @return A Tensor of shape (vocabSize, embeddingDim) that shares the same data as the embedding matrix.
      */
     Tensor<DType> getParameters() {
         return Tensor<DType>(embeddingMatrix, {(size_t)vocabSize, (size_t)embeddingDim});
     }
 
     /**
-     * @brief Execute setParameters operation.
+     * @brief Sets the embedding matrix parameters from a given Tensor. The provided Tensor should have the same shape as the embedding matrix.
+     * This allows external code to set the embedding parameters, for example when loading a saved model state.
+     * @param t A Tensor of shape (vocabSize, embeddingDim) containing the new embedding parameters. 
+     * The data from this Tensor will be used to update the embedding matrix.
      */
     void setParameters(Tensor<DType> t) {
         embeddingMatrix = t.dataPtr();
     }
 
     /**
-     * @brief Execute getGradients operation.
+     * @brief Returns a Tensor that shares the same underlying gradient data as the embedding matrix.
+     * This allows external code to access the accumulated gradients for inspection or custom updates.
+     * @return A Tensor of shape (vocabSize, embeddingDim) that shares the same data as the gradient accumulator.
      */
     Tensor<DType> getGradients() {
         return Tensor<DType>(gradEmbeddingMatrix, {(size_t)vocabSize, (size_t)embeddingDim});
@@ -124,13 +156,26 @@ struct TokenEmbedding {
 };
 
 
+/**
+ * @brief Represents the positional embedding layer that adds positional information to the token embeddings.
+ * @tparam DType The data type used for the embedding vectors (e.g., float).
+ * @tparam IdType The data type used for token IDs (e.g., int).
+ * 
+ * The positional embedding layer maintains an embedding matrix of shape (blockSize, embeddingDim) where
+ * each row corresponds to the positional embedding vector for a specific position in the input sequence.
+ */
 template <typename DType = float, typename IdType = int>
 struct PositionEmbedding {
-    std::shared_ptr<DType[]> embeddingMatrix; ///< Embedding matrix of shape (vocabSize, embeddingDim).
-    std::shared_ptr<DType[]> gradEmbeddingMatrix; ///< Gradient accumulator for embedding matrix.
-    int blockSize;
-    int embeddingDim; ///< Dimensionality of the embeddings.
+    std::shared_ptr<DType[]> embeddingMatrix; /// Embedding matrix of shape (vocabSize, embeddingDim).
+    std::shared_ptr<DType[]> gradEmbeddingMatrix; /// Gradient accumulator for embedding matrix.
+    int blockSize; /// Maximum sequence length (block size) that this positional embedding can handle.
+    int embeddingDim; /// Dimensionality of the embeddings.
 
+    /**
+     * @brief Constructor that initializes the positional embedding matrix and its gradient accumulator.
+     * @param blockSize The maximum sequence length (block size) that this positional embedding can handle.
+     * @param embeddingDim The dimensionality of the embedding vectors.
+     */
     PositionEmbedding(int blockSize, int embeddingDim) 
         : blockSize(blockSize), embeddingDim(embeddingDim) 
     {
@@ -139,7 +184,11 @@ struct PositionEmbedding {
     }
 
     /**
-     * @brief Execute forward operation.
+     * @brief The forward pass that takes a tensor of token IDs and returns the corresponding positional embeddings.
+     * @param input A tensor of shape (batchSize, sequenceLength) containing token IDs. 
+     * The actual token IDs are not used in this layer, but the shape is used to determine the positions.
+     * @return A tensor of shape (batchSize, sequenceLength, embeddingDim) containing the 
+     * positional embedding vectors corresponding to the positions of the input token IDs.
      */
     Tensor<DType> forward(Tensor<IdType> input) {
         std::vector<size_t> os = input.shape().toVector();
@@ -160,14 +209,23 @@ struct PositionEmbedding {
     }
 
     /**
-     * @brief Execute operator() operation.
+     * @brief The forward pass that takes a tensor of token IDs and returns the corresponding positional embeddings.
+     * @param input A tensor of shape (batchSize, sequenceLength) containing token IDs. 
+     * The actual token IDs are not used in this layer, but the shape is used to determine the positions.
+     * @return A tensor of shape (batchSize, sequenceLength, embeddingDim) containing the 
+     * positional embedding vectors corresponding to the positions of the input token IDs.
      */
     Tensor<DType> operator()(Tensor<IdType> input) {
         return forward(input);
     }
 
     /**
-     * @brief Execute backward operation.
+     * @brief Backward pass that takes the input token IDs and the gradient of the loss with respect to the output positional embeddings,
+     * @param input A tensor of shape (batchSize, sequenceLength) containing token IDs. 
+     * The actual token IDs are not used in this layer, but the shape is used to determine the positions.
+     * @param gradOutput The gradient of the loss with respect to the output positional embeddings.
+     * The backward pass will accumulate gradients for the positional embedding matrix based on 
+     * the output gradients and the positions of the input token IDs.
      */
     void backward(Tensor<IdType> input, Tensor<DType> gradOutput) {
         int totalBatchSize = gradOutput.size() / embeddingDim;
@@ -184,7 +242,8 @@ struct PositionEmbedding {
     }
 
     /**
-     * @brief Execute clone operation.
+     * @brief Creates a deep copy of the PositionEmbedding instance, 
+     * including copying the embedding matrix to the new instance.
      */
     PositionEmbedding clone() {
         PositionEmbedding copy(blockSize, embeddingDim);
@@ -193,14 +252,17 @@ struct PositionEmbedding {
     }
 
     /**
-     * @brief Execute zeroGrad operation.
+     * @brief Zeros out the gradients in the gradEmbeddingMatrix, 
+     * preparing it for the next backward pass.
      */
     void zeroGrad() {
         cudaMemset(gradEmbeddingMatrix.get(), 0, blockSize * embeddingDim * sizeof(DType));
     }
 
     /**
-     * @brief Execute sgdUpdate operation.
+     * @brief Performs an SGD update on the positional embedding matrix using the 
+     * accumulated gradients in gradEmbeddingMatrix and the specified learning rate.
+     * @param lr The learning rate to use for the SGD update.
      */
     void sgdUpdate(DType lr) {
         int totalSize = blockSize * embeddingDim;
@@ -216,21 +278,26 @@ struct PositionEmbedding {
     }
 
     /**
-     * @brief Execute getParameters operation.
+     * @brief Returns a Tensor that shares the same underlying embedding matrix data.
+     * This allows external code to access the positional embedding parameters for inspection, saving, or custom updates.
+     * @return A Tensor of shape (blockSize, embeddingDim) that shares the
      */
     Tensor<DType> getParameters() {
         return Tensor<DType>(embeddingMatrix, {(size_t)blockSize, (size_t)embeddingDim});
     }
 
     /**
-     * @brief Execute setParameters operation.
+     * @brief Sets the positional embedding matrix parameters from a given Tensor. 
+     * The provided Tensor should have the same shape as the embedding matrix.
+     * @param t A Tensor of shape (blockSize, embeddingDim) containing the new positional embedding parameters.
      */
     void setParameters(Tensor<DType> t) {
         embeddingMatrix = t.dataPtr();
     }
 
     /**
-     * @brief Execute getGradients operation.
+     * @brief Returns a Tensor that shares the same underlying gradient data as the positional embedding matrix.
+     * This allows external code to access the accumulated gradients for inspection or custom updates.
      */
     Tensor<DType> getGradients() {
         return Tensor<DType>(gradEmbeddingMatrix, {(size_t)blockSize, (size_t)embeddingDim});
@@ -238,57 +305,24 @@ struct PositionEmbedding {
 };
 
 
-template <typename DType = float> Tensor<DType> softmax(Tensor<DType> input, DType temperature = (DType)1.0) {
-    std::vector<size_t> os = input.shape().toVector();
-    Tensor<DType> output(os);
-    int totalBatchSize = output.size() / os.back();
-    dim3 threadsPerBlock(BLOCKDIM);
-    dim3 blocksPerGrid((os.back() + BLOCKDIM - 1) / BLOCKDIM, totalBatchSize);
-    softmaxKernel<DType><<<blocksPerGrid, threadsPerBlock>>>(
-        input.get(),
-        output.get(),
-        os.back(),
-        totalBatchSize,
-        temperature,
-        false
-    );
-    cudaDeviceSynchronize();
-    return output;
-}
-
-template <typename DType > Tensor<DType> softmax_duplicate(Tensor<DType> input, DType temperature) {
-    std::vector<size_t> os = input.shape().toVector();
-    /**
-     * @brief Execute output operation.
-     */
-    Tensor<DType> output(os);
-    int totalBatchSize = output.size() / os.back();
-
-    /**
-     * @brief Execute threadsPerBlock operation.
-     */
-    dim3 threadsPerBlock(BLOCKDIM);
-    dim3 blocksPerGrid((os.back() + BLOCKDIM - 1) / BLOCKDIM, totalBatchSize);
-    softmaxKernel<DType><<<blocksPerGrid, threadsPerBlock>>>(
-        input.get(),
-        output.get(),
-        os.back(),
-        totalBatchSize,
-        temperature,
-        false
-    );
-    cudaDeviceSynchronize();
-    return output;
-}
-
-
+/**
+ * @brief Represents the unembedding layer that maps the output of the transformer back to the vocabulary space for prediction.
+ * @tparam DType The data type used for the embedding vectors (e.g., float).
+ * The unembedding layer maintains an embedding matrix of shape (vocabSize, embeddingDim) where each row corresponds to the unembedding vector for a specific token ID. 
+ * The forward pass computes the logits for each token in the vocabulary by performing a matrix multiplication between
+ */
 template <typename DType = float>
 struct UnEmbedding {
-    std::shared_ptr<DType[]> embeddingMatrix; ///< Embedding matrix of shape (vocabSize, embeddingDim).
-    std::shared_ptr<DType[]> gradEmbeddingMatrix; ///< Gradient accumulator for embedding matrix.
-    int vocabSize; ///< Size of the vocabulary.
-    int embeddingDim; ///< Dimensionality of the embeddings.
+    std::shared_ptr<DType[]> embeddingMatrix; /// Embedding matrix of shape (vocabSize, embeddingDim).
+    std::shared_ptr<DType[]> gradEmbeddingMatrix; /// Gradient accumulator for embedding matrix.
+    int vocabSize; /// Size of the vocabulary.
+    int embeddingDim; /// Dimensionality of the embeddings.
 
+    /**
+     * @brief Constructor that initializes the unembedding matrix and its gradient accumulator.
+     * @param vocabSize The size of the vocabulary (number of unique tokens).
+     * @param embeddingDim The dimensionality of the embedding vectors.
+     */
     UnEmbedding(int vocabSize, int embeddingDim) 
         : vocabSize(vocabSize), embeddingDim(embeddingDim) 
     {
@@ -297,7 +331,9 @@ struct UnEmbedding {
     }
 
     /**
-     * @brief Execute forward operation.
+     * @brief Performs the forward pass for the unembedding layer, giving embeddings of size vocabSize.
+     * Note that to get logits, a sofrmax should be done after this.
+     * @param input The input tensor of shape (batchSize, sequenceLength, embeddingDim).
      */
     Tensor<DType> forward(Tensor<DType> input) {
         std::vector<size_t> os = input.shape().toVector();
@@ -321,14 +357,19 @@ struct UnEmbedding {
     }
 
     /**
-     * @brief Execute operator() operation.
+     * @brief Performs the forward pass for the unembedding layer, giving embeddings of size vocabSize.
+     * Note that to get logits, a sofrmax should be done after this.
+     * @param input The input tensor of shape (batchSize, sequenceLength, embeddingDim).
      */
     Tensor<DType> operator()(Tensor<DType> input) {
         return forward(input);
     }
 
     /**
-     * @brief Execute backward operation.
+     * @brief Performs the backward pass for the unembedding layer.
+     * @param input The input tensor of shape (batchSize, sequenceLength, embeddingDim).
+     * @param gradOutput The gradient tensor of shape (batchSize, sequenceLength, vocabSize).
+     * @return The gradient tensor of shape (batchSize, sequenceLength, embeddingDim).
      */
     Tensor<DType> backward(Tensor<DType> input, Tensor<DType> gradOutput) {
         int totalBatchSize = gradOutput.size() / vocabSize;
@@ -359,7 +400,7 @@ struct UnEmbedding {
     }
 
     /**
-     * @brief Execute clone operation.
+     * @brief Creates a deep copy of the UnEmbedding instance, including copying the embedding matrix to the new instance.
      */
     UnEmbedding<DType> clone() {
         UnEmbedding copy(vocabSize, embeddingDim);
@@ -368,14 +409,15 @@ struct UnEmbedding {
     }
 
     /**
-     * @brief Execute zeroGrad operation.
+     * @brief Zeros out the gradients in the gradEmbeddingMatrix, preparing it for the next backward pass.
      */
     void zeroGrad() {
         cudaMemset(gradEmbeddingMatrix.get(), 0, vocabSize * embeddingDim * sizeof(DType));
     }
 
     /**
-     * @brief Execute sgdUpdate operation.
+     * @brief Performs an SGD update on the unembedding matrix using the 
+     * accumulated gradients in gradEmbeddingMatrix and the specified learning rate.
      */
     void sgdUpdate(DType lr) {
         int totalSize = vocabSize * embeddingDim;
@@ -391,103 +433,32 @@ struct UnEmbedding {
     }
 
     /**
-     * @brief Execute getParameters operation.
+     * @brief Returns a Tensor that shares the same underlying embedding matrix data. 
+     * This allows external code to access the unembedding parameters for inspection, saving, or custom updates.
      */
     Tensor<DType> getParameters() {
         return Tensor<DType>(embeddingMatrix, {(size_t)vocabSize, (size_t)embeddingDim});
     }
 
     /**
-     * @brief Execute setParameters operation.
+     * @brief Sets the unembedding matrix parameters from a given Tensor. 
+     * The provided Tensor should have the same shape as the embedding matrix.
+     * This allows external code to set the unembedding parameters, 
+     * for example when loading a saved model state.
+     * @param t A Tensor of shape (vocabSize, embeddingDim) containing the new unembedding parameters. 
+     * The data from this Tensor will be used to update the unembedding matrix.
      */
     void setParameters(Tensor<DType> t) {
         embeddingMatrix = t.dataPtr();
     }
 
     /**
-     * @brief Execute getGradients operation.
+     * @brief Returns a Tensor that shares the same underlying gradient data as the unembedding matrix. 
+     * This allows external code to access the accumulated gradients for inspection or custom updates.
      */
     Tensor<DType> getGradients() {
         return Tensor<DType>(gradEmbeddingMatrix, {(size_t)vocabSize, (size_t)embeddingDim});
     }
-};
-
-
-/**
- * @brief CrossEntropyLoss struct implementing forward and backward passes for cross-entropy loss with optional softmax.
- * @tparam DType Data type for loss and gradients (default: float).
- * @tparam IdType Data type for target class indices (default: int).
- * 
- * @note This is a helper class with no members, just functions.
- * Call forward() after softmax, and use backward() to compute gradients for
- * the pre-softmax outputs.
- */
-template <typename DType = float, typename IdType = int>
-struct CrossEntropyLoss {
-    static Tensor<DType> forward(Tensor<DType> output, Tensor<IdType> target, DType temperature = (DType)1.0) {
-        std::vector<size_t> os = output.shape().toVector();
-        os.pop_back();
-        /**
-         * @brief Execute loss operation.
-         */
-        Tensor<DType> loss(os);
-        int totalBatchSize = loss.size();
-
-        /**
-         * @brief Execute threadsPerBlock operation.
-         */
-        dim3 threadsPerBlock(BLOCKDIM);
-        dim3 blocksPerGrid((totalBatchSize + BLOCKDIM - 1) / BLOCKDIM);
-        crossEntropyLossKernel<DType, IdType><<<blocksPerGrid, threadsPerBlock>>>(
-            output.get(),
-            target.get(),
-            loss.get(),
-            nullptr,
-            os.back(),
-            totalBatchSize,
-            temperature
-        );
-        cudaDeviceSynchronize();
-        return loss;
-    }
-
-//     Tensor<DType> forward(Tensor<DType> output, Tensor<IdType> target, DType temperature = (DType)1.0) {
-// return CrossEntropyLoss<DType, IdType>::forward(output, target, temperature);
-// }
-
-    Tensor<DType> operator()(Tensor<DType> output, Tensor<IdType> target, DType temperature = (DType)1.0) {
-        return CrossEntropyLoss<DType, IdType>::forward(output, target, temperature);
-    }
-
-    static Tensor<DType> backward(Tensor<DType> output, Tensor<IdType> target, DType temperature = (DType)1.0) {
-        std::vector<size_t> os = output.shape().toVector();
-        /**
-         * @brief Execute inputGrad operation.
-         */
-        Tensor<DType> inputGrad(os);
-        int totalBatchSize = inputGrad.size() / os.back();
-
-        /**
-         * @brief Execute threadsPerBlock operation.
-         */
-        dim3 threadsPerBlock(BLOCKDIM);
-        dim3 blocksPerGrid((totalBatchSize + BLOCKDIM - 1) / BLOCKDIM);
-        crossEntropyLossKernel<DType, IdType><<<blocksPerGrid, threadsPerBlock>>>(
-            output.get(),
-            target.get(),
-            nullptr,
-            inputGrad.get(),
-            os.back(),
-            totalBatchSize,
-            temperature
-        );
-        cudaDeviceSynchronize();
-        return inputGrad;
-    }
-
-//     Tensor<DType> backward(Tensor<DType> output, Tensor<IdType> target, DType temperature = (DType)1.0) {
-// return CrossEntropyLoss<DType, IdType>::backward(output, target, temperature);
-// }
 };
 
 

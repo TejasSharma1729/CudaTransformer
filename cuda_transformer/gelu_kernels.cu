@@ -5,14 +5,28 @@
 
 /**
  * @brief Forward pass for the GELU activation function.
- * Uses the approximate formula: x * Φ(x) ≈ x * (0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3))))
- * This is numerically stable and matches PyTorch's approximation.
  *
- * @tparam DType The data type for computations.
- * @param input Pointer to input data.
- * @param output Pointer to output data.
- * @param inputDim Size of the feature dimension.
- * @param totalBatchSize Total number of elements across all batches.
+ * Applies the tanh approximation of the Gaussian Error Linear Unit:
+ *   output[i] = x * 0.5 * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))
+ * where x = input[i].  This matches PyTorch's default GELU approximation.
+ * All intermediate arithmetic is done in double precision for numerical stability.
+ *
+ * Each thread handles one element; blockIdx.y selects the row (batch/sequence
+ * position) and threadIdx.x + blockIdx.x*blockDim.x selects the feature column.
+ *
+ * Grid:
+ *   gridDim.x = (inputDim       + blockDim.x - 1) / blockDim.x  — feature tiles
+ *   gridDim.y = totalBatchSize                                   — one block row per sample
+ * Block: (blockDim.x, 1)  —  typically (256, 1)
+ *
+ * No shared memory used.
+ *
+ * @tparam DType Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param input          Device pointer (read);  shape [totalBatchSize, inputDim].
+ * @param output         Device pointer (write); shape [totalBatchSize, inputDim].
+ * @param inputDim       Number of features per sample (last dimension).
+ * @param totalBatchSize Number of rows (batchSize * sequenceLength, or just batchSize).
  */
 template <typename DType = float> __global__ void geluForward(
     const DType *input,
@@ -37,18 +51,29 @@ template <typename DType = float> __global__ void geluForward(
 /**
  * @brief Backward pass for the GELU activation function.
  *
- * Gradient derivation:
- * d/dx[x * Φ(x)] = Φ(x) + x * φ(x)
- * where:
- *   Φ(x) = CDF of standard normal (computed via tanh approximation)
- *   φ(x) = PDF of standard normal = exp(-x^2/2) / sqrt(2π)
+ * Computes dL/dinput[i] += geluGrad(input[i]) * gradOutput[i], where:
+ *   let u   = √(2/π) * (x + 0.044715 * x³)
+ *   let Φ   = 0.5 * (1 + tanh(u))           (CDF approximation)
+ *   let Φ'  = 0.5 * (1 - tanh²(u)) * √(2/π) * (1 + 3*0.044715*x²)
+ *   geluGrad(x) = Φ + x * Φ'
  *
- * @tparam DType The data type for computations.
- * @param input Original input data.
- * @param gradInput Pointer to accumulate input gradient.
- * @param gradOutput Gradient with respect to the output.
- * @param inputDim Size of the feature dimension.
- * @param totalBatchSize Total number of elements across all batches.
+ * Uses accumulation (+=); zero gradInput before the first backward call if needed.
+ * All arithmetic is done in double precision.
+ *
+ * Grid / Block: identical to geluForward.
+ *   gridDim.x = (inputDim + blockDim.x - 1) / blockDim.x
+ *   gridDim.y = totalBatchSize
+ * Block: (blockDim.x, 1)  —  typically (256, 1)
+ *
+ * @tparam DType Floating-point data type.
+ *
+ * @param input          Device pointer (read);       shape [totalBatchSize, inputDim].
+ *                       Original forward-pass input; GELU derivative is recomputed from it.
+ * @param gradInput      Device pointer (accumulate); shape [totalBatchSize, inputDim].
+ * @param gradOutput     Device pointer (read);       shape [totalBatchSize, inputDim].
+ *                       Upstream gradient dL/d(output).
+ * @param inputDim       Number of features per sample.
+ * @param totalBatchSize Number of rows.
  */
 template <typename DType = float> __global__ void geluBackward(
     const DType *input,

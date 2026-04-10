@@ -4,7 +4,55 @@
 #define FLASH_ATTENTION_KERNELS
 
 /**
- * @brief Tiled Flash Attention forward pass using shared memory tiles.
+ * @brief Tiled Flash Attention forward pass using shared memory and the online-softmax algorithm.
+ *
+ * Implements the Flash Attention forward pass with O(seqLen) memory complexity by
+ * processing keys and values in tiles and maintaining running max and denominator
+ * accumulators per query row (the "online softmax" trick).  No full seqLen×seqLen
+ * attention score matrix is ever materialised.
+ *
+ * Each thread block is responsible for a contiguous tile of query rows (`blockDim.y`
+ * rows) for one (batch, head) pair.  Within the tile, `threadIdx.y` selects the query
+ * row and `threadIdx.x` selects the key/value column within the tile.
+ *
+ * Grid:
+ *   gridDim.x = (sequenceLength + blockDim.y - 1) / blockDim.y   — tiles along seq dim
+ *   gridDim.y = numHeads
+ *   gridDim.z = batchSize
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous, allocated as a single extern char[]):
+ *   tileQuery    [blockDim.y * headDim]    — query tile for this block's rows
+ *   tileKey      [blockDim.y * headDim]    — key tile loaded each outer iteration
+ *   tileValue    [blockDim.y * headDim]    — value tile loaded each outer iteration
+ *   tileScores   [blockDim.y * blockDim.x] — raw or exp-scaled dot-product scores
+ * Total shared memory: (3 * blockDim.y * headDim + blockDim.y * blockDim.x) * sizeof(DType)
+ *
+ * Algorithm per query row `sequenceIdx`:
+ *   1. Load query[sequenceIdx] into tileQuery.
+ *   2. For each tile of keys/values:
+ *      a. Compute scaled dot-product scores: score = Q·K / sqrt(headDim).
+ *      b. Find the tile row-max; update running max with rescale.
+ *      c. Compute exp(score − newMax) and accumulate into runningDenominator.
+ *      d. Accumulate exp-weighted values into runningWeightedSum[].
+ *   3. Write output[sequenceIdx] = runningWeightedSum / runningDenominator.
+ *   4. Optionally cache maxScores and denominators for the backward pass.
+ *
+ * @tparam DType  Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param queries      Device pointer; shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param keys         Device pointer; shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param values       Device pointer; shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param output       Device pointer (write); shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param maxScores    Device pointer (write, nullable); shape [batchSize, numHeads, sequenceLength].
+ *                     Stores the final running max per query row for the backward pass.
+ *                     Written only by threadIdx.x == 0.  Pass nullptr to skip.
+ * @param denominators Device pointer (write, nullable); shape [batchSize, numHeads, sequenceLength].
+ *                     Stores the final softmax denominator per query row.  Pass nullptr to skip.
+ * @param headDim        Dimension of each attention head.  Must be ≤ 8 * blockDim.x (≤ 256 typically).
+ * @param sequenceLength Number of tokens in the sequence.
+ * @param numHeads       Number of attention heads.
+ * @param batchSize      Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void flashAttention(
     const DType *queries,
@@ -120,8 +168,60 @@ template <typename DType = float> __global__ void flashAttention(
     }
 }
 
+
 /**
- * @brief Backward pass for Flash Attention.
+ * @brief Tiled Flash Attention backward pass.
+ *
+ * Recomputes attention weights on-the-fly from the cached maxScores and denominators
+ * (written by the forward pass) and accumulates gradients for queries, keys, and values.
+ * Like the forward pass, no full seqLen×seqLen matrix is ever materialised.
+ *
+ * Each thread block handles a tile of query rows (`blockDim.y` rows) for one
+ * (batch, head) pair.  For each tile of key/value rows the block computes:
+ *   - softmax weight:  s_{ij} = exp(Q_i·K_j / √d − maxScore_i) / denominator_i
+ *   - "delta" scalar:  δ_i = Σ_d output_i[d] * gradOutput_i[d]
+ *   - attention-score gradient:  dProd_{ij} = s_{ij} * (gradOutput_i · V_j − δ_i) / √d
+ *   - dQ_i  += Σ_j dProd_{ij} * K_j
+ *   - dK_j  += Σ_i dProd_{ij} * Q_i
+ *   - dV_j  += Σ_i s_{ij} * gradOutput_i
+ * All gradient writes are done with atomicAdd to handle overlapping tiles safely.
+ *
+ * Grid (same as forward):
+ *   gridDim.x = (sequenceLength + blockDim.y - 1) / blockDim.y
+ *   gridDim.y = numHeads
+ *   gridDim.z = batchSize
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous, allocated as a single extern char[]):
+ *   tileQuery      [blockDim.y * headDim]    — query rows for this block
+ *   tileKey        [blockDim.y * headDim]    — key tile (each outer iteration)
+ *   tileValue      [blockDim.y * headDim]    — value tile (each outer iteration)
+ *   tileOutput     [blockDim.y * headDim]    — output rows for this block
+ *   tileOutputGrad [blockDim.y * headDim]    — upstream gradient rows for this block
+ *   tileScores     [blockDim.y * blockDim.x] — softmax attention weights s_{ij}
+ *   tileProdGrad   [blockDim.y * blockDim.x] — dProd_{ij} (attention-score gradients)
+ * Total shared: (5 * blockDim.y * headDim + 2 * blockDim.y * blockDim.x) * sizeof(DType)
+ *
+ * @tparam DType  Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param queries      Device pointer (read);  shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param queriesGrad  Device pointer (accumulate via atomicAdd); shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param keys         Device pointer (read);  shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param keysGrad     Device pointer (accumulate via atomicAdd); shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param values       Device pointer (read);  shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param valuesGrad   Device pointer (accumulate via atomicAdd); shape [batchSize, numHeads, sequenceLength, headDim].
+ * @param output       Device pointer (read);  shape [batchSize, numHeads, sequenceLength, headDim].
+ *                     Must be the output stored during the forward pass.
+ * @param outputGrad   Device pointer (read);  shape [batchSize, numHeads, sequenceLength, headDim].
+ *                     Upstream gradient dL/d(output).
+ * @param maxScores    Device pointer (read);  shape [batchSize, numHeads, sequenceLength].
+ *                     Per-row running max from the forward pass.
+ * @param denominators Device pointer (read);  shape [batchSize, numHeads, sequenceLength].
+ *                     Per-row softmax denominator from the forward pass.
+ * @param headDim        Dimension of each attention head.
+ * @param sequenceLength Number of tokens in the sequence.
+ * @param numHeads       Number of attention heads.
+ * @param batchSize      Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void flashAttentionBackward(
     const DType *queries,

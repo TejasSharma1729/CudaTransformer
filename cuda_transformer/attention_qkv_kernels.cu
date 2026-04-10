@@ -4,27 +4,49 @@
 #define ATTENTION_QKV_KERNELS
 
 /**
- * @brief Tiled proj from input to Query, Key, and Value matrices.
- * 
- * Grid: ((numHeads * headDim) / blockDim.x, (batchSize * sequenceLength) / blockDim.y)
- * Block: (blockDim.x, blockDim.y)
- * 
- * @tparam DType The data type for computations.
- * @param input Pointer to input data [batchSize * sequenceLength, inputDim].
- * @param queries Pointer to output Query matrix [batchSize, numHeads, sequenceLength, headDim].
- * @param weightsQuery Pointer to Query weights [numHeads * headDim, inputDim].
- * @param biasesQuery Pointer to Query biases [numHeads * headDim].
- * @param keys Pointer to output Key matrix [batchSize, numHeads, sequenceLength, headDim].
- * @param weightsKey Pointer to Key weights [numHeads * headDim, inputDim].
- * @param biasesKey Pointer to Key biases [numHeads * headDim].
- * @param values Pointer to output Value matrix [batchSize, numHeads, sequenceLength, headDim].
- * @param weightsValue Pointer to Value weights [numHeads * headDim, inputDim].
- * @param biasesValue Pointer to Value biases [numHeads * headDim].
- * @param inputDim Dim of the input features.
- * @param headDim Dim of each attention head.
- * @param sequenceLength Length of the input sequence.
- * @param numHeads Number of attention heads.
- * @param batchSize Number of sequences in the batch.
+ * @brief Fused tiled projection of the input to Query, Key, and Value matrices.
+ *
+ * Computes three linear projections in a single kernel pass:
+ *   Q[b, h, s, d] = Σ_k input[b*S+s, k] * WQ[h*headDim+d, k] + bQ[h*headDim+d]
+ *   K[b, h, s, d] = Σ_k input[b*S+s, k] * WK[h*headDim+d, k] + bK[h*headDim+d]
+ *   V[b, h, s, d] = Σ_k input[b*S+s, k] * WV[h*headDim+d, k] + bV[h*headDim+d]
+ *
+ * Uses BLOCKDIM×BLOCKDIM shared-memory tiles over the inputDim reduction axis.
+ * All three weight tiles are loaded simultaneously per tile iteration to maximise
+ * L1 reuse of the shared input tile.
+ *
+ * Output is scatter-written from the logical flat (batchSize*seqLen, numHeads*headDim)
+ * layout into the [batchSize, numHeads, seqLen, headDim] 4-D layout.
+ *
+ * Grid:
+ *   gridDim.x = (numHeads * headDim    + blockDim.x - 1) / blockDim.x  — projection-column tiles
+ *   gridDim.y = (batchSize * seqLen    + blockDim.y - 1) / blockDim.y  — row tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedInput        [blockDim.y * blockDim.x]  — tile of input rows
+ *   sharedWeightsQuery [blockDim.x * blockDim.y]  — tile of WQ columns (transposed load)
+ *   sharedWeightsKey   [blockDim.x * blockDim.y]  — tile of WK columns (transposed load)
+ *   sharedWeightsValue [blockDim.x * blockDim.y]  — tile of WV columns (transposed load)
+ * Total shared: 4 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * @tparam DType Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param input         Device pointer (read);  shape [batchSize * seqLen, inputDim].
+ * @param queries       Device pointer (write); shape [batchSize, numHeads, seqLen, headDim].
+ * @param weightsQuery  Device pointer (read);  shape [numHeads * headDim, inputDim].
+ * @param biasesQuery   Device pointer (read);  shape [numHeads * headDim].
+ * @param keys          Device pointer (write); shape [batchSize, numHeads, seqLen, headDim].
+ * @param weightsKey    Device pointer (read);  shape [numHeads * headDim, inputDim].
+ * @param biasesKey     Device pointer (read);  shape [numHeads * headDim].
+ * @param values        Device pointer (write); shape [batchSize, numHeads, seqLen, headDim].
+ * @param weightsValue  Device pointer (read);  shape [numHeads * headDim, inputDim].
+ * @param biasesValue   Device pointer (read);  shape [numHeads * headDim].
+ * @param inputDim      Number of input features per token.
+ * @param headDim       Dimension of each individual attention head.
+ * @param sequenceLength Number of tokens per sequence (seqLen).
+ * @param numHeads      Number of attention heads.
+ * @param batchSize     Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void getQKVmatrices(
     const DType *input,
@@ -99,8 +121,52 @@ template <typename DType = float> __global__ void getQKVmatrices(
     }
 }
 
+
 /**
- * @brief Backward pass for Q, K, V projs to compute weight and bias grad.
+ * @brief Backward pass for the fused QKV projection: accumulates weight and bias gradients.
+ *
+ * Computes dL/dWQ, dL/dWK, dL/dWV and dL/dbQ, dL/dbK, dL/dbV from the upstream
+ * gradients of Q, K, V and the original input:
+ *   dWQ[outputIdx, inputIdx] += Σ_{batch} queryGrad_flat[batch, outputIdx] * input[batch, inputIdx]
+ *   (identical formula for K and V)
+ *   dbQ[outputIdx]           += Σ_{batch} queryGrad_flat[batch, outputIdx]
+ *
+ * Iterates over the totalBatchSize (batchSize*seqLen) axis in tiles of blockDim.x.
+ * All three upstream gradient tiles (Q, K, V) are loaded simultaneously per tile
+ * to share the input tile load.  Gradient accumulation uses atomicAdd.
+ * Bias gradients are accumulated per tile (inputIdx == 0 guard to avoid counting
+ * each input-dim column multiple times) and atomicAdded at the end.
+ *
+ * Grid:
+ *   gridDim.x = (inputDim          + blockDim.x - 1) / blockDim.x  — input-dim tiles
+ *   gridDim.y = (numHeads * headDim + blockDim.y - 1) / blockDim.y  — projection-dim tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedInput [blockDim.y * blockDim.x]  — tile of input rows (transposed load)
+ *   sharedQGrad [blockDim.y * blockDim.x]  — tile of queryGrad_flat rows
+ *   sharedKGrad [blockDim.y * blockDim.x]  — tile of keyGrad_flat rows
+ *   sharedVGrad [blockDim.y * blockDim.x]  — tile of valueGrad_flat rows
+ * Total shared: 4 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * @tparam DType Floating-point data type.
+ *
+ * @param input           Device pointer (read); shape [batchSize * seqLen, inputDim].
+ * @param queryGrad       Device pointer (read); shape [batchSize, numHeads, seqLen, headDim].
+ *                        Upstream gradient dL/dQ; gathered into flat layout in-kernel.
+ * @param weightsQueryGrad Device pointer (accumulate via atomicAdd); shape [numHeads*headDim, inputDim].
+ * @param biasesQueryGrad  Device pointer (accumulate via atomicAdd); shape [numHeads*headDim].
+ * @param keyGrad         Device pointer (read); shape [batchSize, numHeads, seqLen, headDim].
+ * @param weightsKeyGrad  Device pointer (accumulate via atomicAdd); shape [numHeads*headDim, inputDim].
+ * @param biasesKeyGrad   Device pointer (accumulate via atomicAdd); shape [numHeads*headDim].
+ * @param valueGrad       Device pointer (read); shape [batchSize, numHeads, seqLen, headDim].
+ * @param weightsValueGrad Device pointer (accumulate via atomicAdd); shape [numHeads*headDim, inputDim].
+ * @param biasesValueGrad  Device pointer (accumulate via atomicAdd); shape [numHeads*headDim].
+ * @param inputDim        Number of input features per token.
+ * @param headDim         Dimension of each attention head.
+ * @param sequenceLength  Number of tokens per sequence.
+ * @param numHeads        Number of attention heads.
+ * @param batchSize       Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void qkvBackwardWB(
     const DType *input,
@@ -185,7 +251,46 @@ template <typename DType = float> __global__ void qkvBackwardWB(
 }
 
 /**
- * @brief Backward pass for Q, K, V projs to compute input grad.
+ * @brief Backward pass for the fused QKV projection: computes input gradient.
+ *
+ * Accumulates the contribution to dL/dinput from all three projections:
+ *   dInput[row, col] += Σ_k queryGrad_flat[row, k] * WQ[k, col]
+ *                     + Σ_k keyGrad_flat  [row, k] * WK[k, col]
+ *                     + Σ_k valueGrad_flat[row, k] * WV[k, col]
+ *
+ * Uses BLOCKDIM×BLOCKDIM shared-memory tiles iterating over the projDim
+ * (= numHeads*headDim) reduction axis.  All three gradient tiles and all three
+ * weight tiles are loaded simultaneously per iteration to amortise memory traffic.
+ * Gradient accumulation uses atomicAdd.
+ *
+ * Grid:
+ *   gridDim.x = (inputDim          + blockDim.x - 1) / blockDim.x  — input-column tiles
+ *   gridDim.y = (batchSize * seqLen + blockDim.y - 1) / blockDim.y  — row tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sQGrad [blockDim.y * blockDim.x]  — tile of queryGrad_flat columns
+ *   sKGrad [blockDim.y * blockDim.x]  — tile of keyGrad_flat columns
+ *   sVGrad [blockDim.y * blockDim.x]  — tile of valueGrad_flat columns
+ *   sQW    [blockDim.y * blockDim.x]  — tile of WQ rows (transposed load)
+ *   sKW    [blockDim.y * blockDim.x]  — tile of WK rows (transposed load)
+ *   sVW    [blockDim.y * blockDim.x]  — tile of WV rows (transposed load)
+ * Total shared: 6 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * @tparam DType Floating-point data type.
+ *
+ * @param inputGrad    Device pointer (accumulate via atomicAdd); shape [batchSize*seqLen, inputDim].
+ * @param queryGrad    Device pointer (read); shape [batchSize, numHeads, seqLen, headDim].
+ * @param keyGrad      Device pointer (read); shape [batchSize, numHeads, seqLen, headDim].
+ * @param valueGrad    Device pointer (read); shape [batchSize, numHeads, seqLen, headDim].
+ * @param weightsQuery Device pointer (read); shape [numHeads * headDim, inputDim].
+ * @param weightsKey   Device pointer (read); shape [numHeads * headDim, inputDim].
+ * @param weightsValue Device pointer (read); shape [numHeads * headDim, inputDim].
+ * @param inputDim     Number of input features per token.
+ * @param headDim      Dimension of each attention head.
+ * @param sequenceLength Number of tokens per sequence.
+ * @param numHeads     Number of attention heads.
+ * @param batchSize    Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void qkvBackward(
     DType *inputGrad,

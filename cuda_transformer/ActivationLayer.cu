@@ -39,7 +39,11 @@ template <typename DType = float> struct ActivationLayer : public Layer<DType> {
         return std::make_shared<ActivationLayer<DType>>(inputDim, activationType);
     }
 
-    /** @brief Forward pass; dispatches to the appropriate kernel. */
+    /** 
+     * @brief Forward pass; dispatches to the appropriate kernel.
+     * @param input The input tensor of shape [batch_size, seq_len, inputDim].
+     * @return Output tensor of the same shape with the activation applied elementwise.
+     */
     Tensor<DType> forward(Tensor<DType> input) override {
         assert(input.shape()[input.nDim() - 1] == (size_t)inputDim);
         Tensor<DType> output(input.shape().toVector());
@@ -63,7 +67,12 @@ template <typename DType = float> struct ActivationLayer : public Layer<DType> {
         return output;
     }
 
-    /** @brief Backward pass; dispatches to the appropriate gradient kernel. */
+    /** 
+     * @brief Backward pass; dispatches to the appropriate gradient kernel.
+     * @param input The input tensor of shape [batch_size, seq_len, inputDim].
+     * @param gradOutput The gradient tensor of shape [batch_size, seq_len, inputDim].
+     * @return Gradient tensor of the same shape with the activation applied elementwise.
+     */
     Tensor<DType> backward(Tensor<DType> input, Tensor<DType> gradOutput) override {
         Tensor<DType> gradInput(gradOutput.shape().toVector());
         int totalBatch = gradOutput.size() / inputDim;
@@ -85,16 +94,6 @@ template <typename DType = float> struct ActivationLayer : public Layer<DType> {
         }
         return gradInput;
     }
-
-    /** @brief Activation functions have no learnable parameters. */
-    std::map<std::string, Tensor<DType>> getParameters() override {
-        return {};
-    }
-
-    /** @brief Activation functions have no learnable parameters. */
-    std::map<std::string, Tensor<DType>> getGradients() override {
-        return {};
-    }
 };
 
 /**
@@ -104,41 +103,46 @@ template <typename DType = float> struct ActivationLayer : public Layer<DType> {
  * @return Module<DType> Shared pointer to the activation module.
  */
 template <typename DType = float>
-/**
- * @brief Execute Activation operation.
- */
 Module<DType> Activation(int inputDim, ActivationType act) {
     return std::make_shared<ActivationLayer<DType>>(inputDim, act);
 }
 
-template <typename DType = float>
 /**
- * @brief Execute SigmoidActivation operation.
+ * @brief Factory function for Sigmoid activation layer.
+ * @param inputDim Feature dimension.
+ * @return Module<DType> Shared pointer to the sigmoid activation module.
  */
+template <typename DType = float>
 Module<DType> SigmoidActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::Sigmoid);
 }
 
-template <typename DType = float>
 /**
- * @brief Execute TanhActivation operation.
+ * @brief Factory function for Tanh activation layer.
+ * @param inputDim Feature dimension.
+ * @return Module<DType> Shared pointer to the tanh activation module.
  */
+template <typename DType = float>
 Module<DType> TanhActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::Tanh);
 }
 
-template <typename DType = float>
 /**
- * @brief Execute ReLUActivation operation.
+ * @brief Factory function for ReLU activation layer.
+ * @param inputDim Feature dimension.
+ * @return Module<DType> Shared pointer to the ReLU activation module.
  */
+template <typename DType = float>
 Module<DType> ReLUActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::ReLU);
 }
 
-template <typename DType = float>
 /**
- * @brief Execute GELUActivation operation.
+ * @brief Factory function for GELU activation layer.
+ * @param inputDim Feature dimension.
+ * @return Module<DType> Shared pointer to the GELU activation module.
  */
+template <typename DType = float>
 Module<DType> GELUActivation(int inputDim) {
     return Activation<DType>(inputDim, ActivationType::GELU);
 }

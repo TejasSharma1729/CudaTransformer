@@ -1,3 +1,4 @@
+#include <array>
 #include "QKVProjectionLayer.cu"
 #include "FlashAttentionLayer.cu"
 #include "OutputProjectionLayer.cu"
@@ -30,8 +31,7 @@ template <typename DType = float> struct AttentionLayer : public Layer<DType> {
           flashAttn(headDim, numHeads),
           outProj(inputDim, headDim, numHeads),
           inputDim(inputDim), numHeads(numHeads), headDim(headDim)
-    {
-    }
+    { }
 
     /** @brief Clones the attention layer. */
     std::shared_ptr<Layer<DType>> clone() override {
@@ -55,100 +55,100 @@ template <typename DType = float> struct AttentionLayer : public Layer<DType> {
         return clonedLayer;
     }
 
-    /** @brief Forward pass through all three sub-components. */
+    /**
+     * @brief Forward pass through all three sub-components (QKV projection, flash attention, output projection).
+     * @param input The input tensor to the attention layer [batch, seq_len, inputDim].
+     * @return The output tensor from the attention layer [batch, seq_len, inputDim].
+     */
     Tensor<DType> forward(Tensor<DType> input) override {
+        return forward(input, nullptr);
+    }
+
+    /**
+     * @brief Forward pass with optional state caching for backward.
+     * If `outStates` is provided, it will be filled with intermediate tensors for use in the backward pass. 
+     * The caller is responsible for managing the memory of `outStates`.
+     * @param input The input tensor to the attention layer.
+     * @param outStates Optional array of 4 Tensors to store intermediate states: [queries, keys, values, attentionOutput].
+     * @return The output tensor from the attention layer
+     */
+    Tensor<DType> forward(Tensor<DType> input, Tensor<DType>* outStates) {
         int sequenceLength = input.shape()[input.nDim() - 2];
         int batchSize = input.size() / (sequenceLength * inputDim);
-        std::vector<size_t> qkvShape = {(size_t)batchSize, (size_t)numHeads, (size_t)sequenceLength, (size_t)headDim};
 
         // Step 1: Project to Q, K, V
-        Tensor<DType> queries(qkvShape), keys(qkvShape), values(qkvShape);
-        dim3 threadsPerBlock(BLOCKDIM, BLOCKDIM);
-        dim3 gridQKV((numHeads * headDim + BLOCKDIM - 1) / BLOCKDIM, (batchSize * sequenceLength + BLOCKDIM - 1) / BLOCKDIM);
-        getQKVmatrices<DType><<<gridQKV, threadsPerBlock, 4 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
-            input.get(), queries.get(), qkvProj.weightsQuery.get(), qkvProj.biasesQuery.get(),
-            keys.get(), qkvProj.weightsKey.get(), qkvProj.biasesKey.get(),
-            values.get(), qkvProj.weightsValue.get(), qkvProj.biasesValue.get(),
-            inputDim, headDim, sequenceLength, numHeads, batchSize
-        );
-
-        // Step 2: Compute flash attention (with caching for backward)
-        Tensor<DType> attentionOutput = flashAttn.computeAttention(queries, keys, values);
+        std::array<Tensor<DType>, 3> qkv = qkvProj.computeQKV(input);
+        if (outStates != nullptr) {
+            outStates[0] = qkv[0]; // Queries
+            outStates[1] = qkv[1]; // Keys
+            outStates[2] = qkv[2]; // Values
+        }
+        // Step 2: Compute flash attention (with caching for backward if saveStates is true)
+        Tensor<DType> attentionOutput = flashAttn.computeAttention(qkv[0], qkv[1], qkv[2], (outStates != nullptr));
+        if (outStates != nullptr) {
+            outStates[3] = attentionOutput;
+            qkv[0] = Tensor<DType>(); // Free Q, K, V if not caching states
+            qkv[1] = Tensor<DType>();
+            qkv[2] = Tensor<DType>();
+        }
 
         // Step 3: Project output
-        // Reshape attention output for projection: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, num_heads*head_dim]
-        std::vector<size_t> reshapedShape = {(size_t)batchSize, (size_t)sequenceLength, (size_t)(numHeads * headDim)};
-        Tensor<DType> reshapedAttn(reshapedShape);
-        cudaMemcpy(reshapedAttn.get(), attentionOutput.get(), attentionOutput.size() * sizeof(DType), cudaMemcpyDeviceToDevice);
-
-        Tensor<DType> finalOutput = outProj.forward(reshapedAttn);
-
+        Tensor<DType> finalOutput = outProj.forward(attentionOutput);
+        attentionOutput = Tensor<DType>(); // Free attention output if not caching states
+        if (outStates != nullptr) {
+            outStates[3] = Tensor<DType>(); // Free attention output state if caching states 
+        }
         return finalOutput;
     }
 
-    /** @brief Backward pass through all three sub-components. */
+    /**
+     * @brief Backward pass through all three sub-components (QKV, Attention, Projection).
+     * This version does not use cached states and recomputes forward pass internally.
+     * 
+     * @param input The original input tensor to the attention layer [batch, seq_len, inputDim].
+     * @param gradOutput The gradient of the loss with respect to the output of the attention layer (same shape).
+     * @return The gradient of the loss with respect to the input of the attention layer [batch, seq_len, inputDim].
+     */
     Tensor<DType> backward(Tensor<DType> input, Tensor<DType> gradOutput) override {
+        Tensor<DType> *states = new Tensor<DType>[4];
+        forward(input, states);
+        Tensor<DType> inputGrad = backward(input, gradOutput, states);
+        delete[] states;
+        return inputGrad;
+    }
+
+    /**
+     * @brief Backward pass with cached states from forward.
+     * @param input The original input tensor to the attention layer [batch, seq_len, inputDim].
+     * @param gradOutput The gradient of the loss with respect to the output of the attention layer (same shape).
+     * @param states Array of cached tensors from the forward pass: [queries, keys, values, attentionOutput].
+     * @return The gradient of the loss with respect to the input of the attention layer.
+     */
+    Tensor<DType> backward(Tensor<DType> input, Tensor<DType> gradOutput, Tensor<DType>* states) {
         int sequenceLength = input.shape()[input.nDim() - 2];
         int batchSize = input.size() / (sequenceLength * inputDim);
         std::vector<size_t> qkvShape = {(size_t)batchSize, (size_t)numHeads, (size_t)sequenceLength, (size_t)headDim};
 
-        // Recompute forward pass for activations
-        Tensor<DType> queries(qkvShape), keys(qkvShape), values(qkvShape);
-        dim3 threadsPerBlock(BLOCKDIM, BLOCKDIM);
-        dim3 gridQKV((numHeads * headDim + BLOCKDIM - 1) / BLOCKDIM, (batchSize * sequenceLength + BLOCKDIM - 1) / BLOCKDIM);
-        getQKVmatrices<DType><<<gridQKV, threadsPerBlock, 4 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
-            input.get(), queries.get(), qkvProj.weightsQuery.get(), qkvProj.biasesQuery.get(),
-            keys.get(), qkvProj.weightsKey.get(), qkvProj.biasesKey.get(),
-            values.get(), qkvProj.weightsValue.get(), qkvProj.biasesValue.get(),
-            inputDim, headDim, sequenceLength, numHeads, batchSize
-        );
-
-        Tensor<DType> attentionOutput = flashAttn.computeAttention(queries, keys, values);
-        std::vector<size_t> reshapedShape = {(size_t)batchSize, (size_t)sequenceLength, (size_t)(numHeads * headDim)};
-
-        Tensor<DType> reshapedAttn(reshapedShape);
-        cudaMemcpy(reshapedAttn.get(), attentionOutput.get(), attentionOutput.size() * sizeof(DType), cudaMemcpyDeviceToDevice);
+        const Tensor<DType> queries = states[0];
+        const Tensor<DType> keys = states[1];
+        const Tensor<DType> values = states[2];
 
         // Backward through output projection
-        Tensor<DType> attnGrad = outProj.backward(reshapedAttn, gradOutput);
-
-        // Reshape gradient back: [batch, seq_len, num_heads*head_dim] -> [batch, num_heads, seq_len, head_dim]
-        Tensor<DType> reshapedAttnGrad(qkvShape);
-        cudaMemcpy(reshapedAttnGrad.get(), attnGrad.get(), attnGrad.size() * sizeof(DType), cudaMemcpyDeviceToDevice);
+        Tensor<DType> attnGrad = outProj.backward(states[3], gradOutput);
+        states[3] = Tensor<DType>(); // Free attention output state
 
         // Backward through flash attention using cached values
-        Tensor<DType> queryGrad(qkvShape), keyGrad(qkvShape), valueGrad(qkvShape);
-        flashAttn.computeBackward(queries, queryGrad, keys, keyGrad, values, valueGrad, reshapedAttnGrad);
-
-        // Initialize gradient buffers if needed
-        if (qkvProj.weightsQueryGrad == nullptr) {
-            int projSize = inputDim * headDim * numHeads;
-            int biasSize = headDim * numHeads;
-            qkvProj.weightsQueryGrad = cudaMakeShared<DType>(projSize);
-            qkvProj.biasesQueryGrad = cudaMakeShared<DType>(biasSize);
-            qkvProj.weightsKeyGrad = cudaMakeShared<DType>(projSize);
-            qkvProj.biasesKeyGrad = cudaMakeShared<DType>(biasSize);
-            qkvProj.weightsValueGrad = cudaMakeShared<DType>(projSize);
-            qkvProj.biasesValueGrad = cudaMakeShared<DType>(biasSize);
-        }
+        std::array<Tensor<DType>, 3> qkvGrads = flashAttn.computeBackward(states[0], states[1], states[2], attnGrad);
+        states[0] = Tensor<DType>(); // Free Q, K, V state
+        states[1] = Tensor<DType>();
+        states[2] = Tensor<DType>();
+        attnGrad = Tensor<DType>(); // Free attention grad
 
         // Backward through QKV projection
-        int totalInputDim = numHeads * headDim;
-        dim3 gridQKVWB((inputDim + BLOCKDIM - 1) / BLOCKDIM, (totalInputDim + BLOCKDIM - 1) / BLOCKDIM);
-        qkvBackwardWB<DType><<<gridQKVWB, threadsPerBlock, 4 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
-            input.get(), queryGrad.get(), qkvProj.weightsQueryGrad.get(), qkvProj.biasesQueryGrad.get(),
-            keyGrad.get(), qkvProj.weightsKeyGrad.get(), qkvProj.biasesKeyGrad.get(),
-            valueGrad.get(), qkvProj.weightsValueGrad.get(), qkvProj.biasesValueGrad.get(),
-            inputDim, headDim, sequenceLength, numHeads, batchSize
-        );
-
-        Tensor<DType> inputGrad(input.shape().toVector());
-        dim3 gridQKVInput((inputDim + BLOCKDIM - 1) / BLOCKDIM, (batchSize * sequenceLength + BLOCKDIM - 1) / BLOCKDIM);
-        qkvBackward<DType><<<gridQKVInput, threadsPerBlock, 6 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
-            inputGrad.get(), queryGrad.get(), keyGrad.get(), valueGrad.get(),
-            qkvProj.weightsQuery.get(), qkvProj.weightsKey.get(), qkvProj.weightsValue.get(),
-            inputDim, headDim, sequenceLength, numHeads, batchSize
-        );
+        Tensor<DType> inputGrad = qkvProj.computeBackward(input, qkvGrads[0], qkvGrads[1], qkvGrads[2]);
+        qkvGrads[0] = Tensor<DType>(); // Free Q, K, V grad
+        qkvGrads[1] = Tensor<DType>();
+        qkvGrads[2] = Tensor<DType>();
 
         flashAttn.clearCache();
         return inputGrad;

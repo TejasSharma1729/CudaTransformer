@@ -5,7 +5,45 @@
 
 
 /**
- * @brief Projects multi-head attention output back to the model dim using tiling.
+ * @brief Projects multi-head attention output to the model dimension using a tiled matrix multiply.
+ *
+ * Computes output = input_flat × W^T + bias, where input_flat is the attention output
+ * rearranged from [batchSize, numHeads, seqLen, headDim] into a logical
+ * [batchSize*seqLen, numHeads*headDim] matrix, and W has shape [outputDim, numHeads*headDim].
+ *
+ * The kernel uses BLOCKDIM×BLOCKDIM shared-memory tiles to amortise global memory
+ * bandwidth.  Each output element is accumulated across tiles of width blockDim.x
+ * along the totalInputDim (= numHeads*headDim) reduction axis.
+ *
+ * Grid:
+ *   gridDim.x = (outputDim       + blockDim.x - 1) / blockDim.x   — output-column tiles
+ *   gridDim.y = (batchSize*seqLen + blockDim.y - 1) / blockDim.y   — output-row tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedInput   [blockDim.y * blockDim.x]  — tile of input_flat rows
+ *   sharedWeights [blockDim.x * blockDim.y]  — tile of weight columns (transposed)
+ * Total shared: 2 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * Input rearrangement (in-kernel, no extra copy):
+ *   flat row    r  →  batch b = r / seqLen,  seq s = r % seqLen
+ *   flat column c  →  head  h = c / headDim, dim  d = c % headDim
+ *   memory offset: ((b * numHeads + h) * seqLen + s) * headDim + d
+ *
+ * @tparam DType  Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param input    Device pointer (read);  shape [batchSize, numHeads, seqLen, headDim].
+ * @param output   Device pointer (write); shape [batchSize * seqLen, outputDim]
+ *                 (equivalently [batchSize, seqLen, outputDim]).
+ * @param weights  Device pointer (read);  shape [outputDim, numHeads * headDim].
+ *                 Row-major; weight row `o` corresponds to output dimension `o`.
+ * @param biases   Device pointer (read);  shape [outputDim].
+ *                 Added to every row of the output.
+ * @param outputDim      Number of output features (model dimension after projection).
+ * @param headDim        Dimension of each individual attention head.
+ * @param sequenceLength Number of tokens in the sequence (seqLen).
+ * @param numHeads       Number of attention heads.
+ * @param batchSize      Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void attentionProj(
     const DType *input,
@@ -59,8 +97,47 @@ template <typename DType = float> __global__ void attentionProj(
     }
 }
 
+
 /**
- * @brief Backward pass for attention proj to compute weight and bias grad.
+ * @brief Backward pass for the attention projection: accumulates weight and bias gradients.
+ *
+ * Computes dL/dW and dL/db for the projection layer, treating the operation as
+ * output = input_flat × W^T + b.  Specifically:
+ *   dW[outputDimIdx, inputDimIdx] += Σ_{batch} outputGrad[batch, outputDimIdx] * input_flat[batch, inputDimIdx]
+ *   db[outputDimIdx]              += Σ_{batch} outputGrad[batch, outputDimIdx]
+ *
+ * The kernel iterates over the totalBatchSize (batchSize*seqLen) axis in tiles of
+ * width blockDim.x to amortise memory traffic.  Both output-gradient rows and flattened
+ * input rows are loaded into shared memory per tile.
+ *
+ * Grid:
+ *   gridDim.x = (totalInputDim + blockDim.x - 1) / blockDim.x   — input-column tiles  (totalInputDim = numHeads*headDim)
+ *   gridDim.y = (outputDim     + blockDim.y - 1) / blockDim.y   — output-dimension tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedOutputGrad [blockDim.y * blockDim.x]  — tile of outputGrad rows
+ *   sharedInput      [blockDim.x * blockDim.y]  — tile of input_flat rows (transposed load)
+ * Total shared: 2 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * Gradient accumulation uses atomicAdd so that multiple blocks can safely update the
+ * same weightGrad and biasGrad element when tiles overlap.
+ *
+ * @tparam DType  Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param input       Device pointer (read);  shape [batchSize, numHeads, seqLen, headDim].
+ *                    Rearranged inside the kernel to [batchSize*seqLen, numHeads*headDim].
+ * @param outputGrad  Device pointer (read);  shape [batchSize * seqLen, outputDim].
+ *                    Upstream gradient dL/d(output).
+ * @param weightGrad  Device pointer (accumulate via atomicAdd); shape [outputDim, numHeads*headDim].
+ * @param biasGrad    Device pointer (accumulate via atomicAdd); shape [outputDim].
+ *                    Only accumulated by threads where inputDimIdx == 0 to avoid
+ *                    multi-counting along the input-column dimension.
+ * @param outputDim      Number of output features.
+ * @param headDim        Dimension of each attention head.
+ * @param sequenceLength Number of tokens in the sequence (seqLen).
+ * @param numHeads       Number of attention heads.
+ * @param batchSize      Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void projBackwardWB(
     const DType *input,
@@ -121,7 +198,44 @@ template <typename DType = float> __global__ void projBackwardWB(
 }
 
 /**
- * @brief Backward pass for attention proj to compute input grad.
+ * @brief Backward pass for the attention projection: computes input gradient.
+ *
+ * Computes dL/d(input_flat) = outputGrad × W, then scatter-writes the result
+ * back into the [batchSize, numHeads, seqLen, headDim] layout.
+ *   inputGrad_flat[row, col] = Σ_k outputGrad[row, k] * W[k, col]
+ *
+ * Uses BLOCKDIM×BLOCKDIM shared-memory tiles iterating over the outputDim axis.
+ *
+ * Grid:
+ *   gridDim.x = (totalInputDim   + blockDim.x - 1) / blockDim.x   — input-column tiles  (totalInputDim = numHeads*headDim)
+ *   gridDim.y = (batchSize*seqLen + blockDim.y - 1) / blockDim.y   — row tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedOutputGrad [blockDim.y * blockDim.x]  — tile of outputGrad columns
+ *   sharedWeights    [blockDim.x * blockDim.y]  — tile of weight rows (transposed load)
+ * Total shared: 2 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * Output scatter (in-kernel, no extra copy):
+ *   flat row    r  →  batch b = r / seqLen,  seq s = r % seqLen
+ *   flat column c  →  head  h = c / headDim, dim  d = c % headDim
+ *   write offset: ((b * numHeads + h) * seqLen + s) * headDim + d
+ *
+ * Note: this kernel overwrites (not accumulates) inputGrad — zero it before calling
+ * if multiple gradient contributions are expected.
+ *
+ * @tparam DType  Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param inputGrad   Device pointer (write); shape [batchSize, numHeads, seqLen, headDim].
+ * @param outputGrad  Device pointer (read);  shape [batchSize * seqLen, outputDim].
+ *                    Upstream gradient dL/d(output).
+ * @param weights     Device pointer (read);  shape [outputDim, numHeads * headDim].
+ *                    Same weight matrix used in the forward pass.
+ * @param outputDim      Number of output features.
+ * @param headDim        Dimension of each attention head.
+ * @param sequenceLength Number of tokens in the sequence (seqLen).
+ * @param numHeads       Number of attention heads.
+ * @param batchSize      Number of sequences in the batch.
  */
 template <typename DType = float> __global__ void projBackward(
     DType *inputGrad,

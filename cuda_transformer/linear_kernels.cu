@@ -4,19 +4,34 @@
 #define LINEAR_KERNELS
 
 /**
- * @brief Forward pass for a Linear layer using 2D matrix tiling.
- * 
- * Grid: (outputDim / blockDim.x, batchSize / blockDim.y)
- * Block: (blockDim.x, blockDim.y)
- * 
- * @tparam DType The data type for computations.
- * @param input Pointer to the input matrix [batchSize, inputDim].
- * @param output Pointer to the output matrix [batchSize, outputDim].
- * @param weights Pointer to the weights matrix [outputDim, inputDim].
- * @param biases Pointer to the bias vector [outputDim].
- * @param inputDim Number of input features.
+ * @brief Forward pass for a Linear layer: output = input × W^T + bias.
+ *
+ * Computes output[row, col] = Σ_k input[row, k] * weights[col, k] + biases[col]
+ * using BLOCKDIM×BLOCKDIM shared-memory tiles over the inputDim reduction axis.
+ * The bias is pre-loaded into the accumulator before the tile loop.
+ * biases may be nullptr, in which case no bias is added.
+ *
+ * Grid:
+ *   gridDim.x = (outputDim + blockDim.x - 1) / blockDim.x  — output-column tiles
+ *   gridDim.y = (batchSize + blockDim.y - 1) / blockDim.y  — row tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedInput   [blockDim.y * blockDim.x]  — tile of input rows
+ *   sharedWeights [blockDim.x * blockDim.y]  — tile of weight columns (transposed load)
+ * Total shared: 2 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * @tparam DType Floating-point data type (float, double, __half, __nv_bfloat16).
+ *
+ * @param input     Device pointer (read);  shape [batchSize, inputDim].
+ * @param output    Device pointer (write); shape [batchSize, outputDim].
+ * @param weights   Device pointer (read);  shape [outputDim, inputDim].
+ *                  Row-major; weight row `o` corresponds to output feature `o`.
+ * @param biases    Device pointer (read, nullable); shape [outputDim].
+ *                  Pass nullptr to skip bias addition.
+ * @param inputDim  Number of input features.
  * @param outputDim Number of output features.
- * @param batchSize Number of examples in the batch.
+ * @param batchSize Number of rows (batchSize * sequenceLength for sequence inputs).
  */
 template <typename DType = float> __global__ void linearForward(
     const DType *input,
@@ -64,18 +79,38 @@ template <typename DType = float> __global__ void linearForward(
 }
 
 /**
- * @brief Backward pass for Linear layer weights and biases.
- * 
- * Tiles over the batch dim to accumulate grad for weights and biases.
- * 
- * @tparam DType The data type for computations.
- * @param input Pointer to the original input [batchSize, inputDim].
- * @param outputGrad Pointer to the grad from the next layer [batchSize, outputDim].
- * @param weightsGrad Pointer to accumulate weight grad [outputDim, inputDim].
- * @param biasesGrad Pointer to accumulate bias grad [outputDim].
- * @param inputDim Number of input features.
- * @param outputDim Number of output features.
- * @param batchSize Number of examples in the batch.
+ * @brief Backward pass for Linear layer: accumulates weight and bias gradients.
+ *
+ * Computes:
+ *   dW[outputIdx, inputIdx] += Σ_{batch} outputGrad[batch, outputIdx] * input[batch, inputIdx]
+ *   db[outputIdx]           += Σ_{batch} outputGrad[batch, outputIdx]
+ *
+ * Iterates over the batchSize axis in tiles of blockDim.x, loading outputGrad and
+ * input into shared memory.  Gradient accumulation uses atomicAdd.
+ * Bias gradient is reduced within each warp using __shfl_down_sync before the
+ * atomicAdd, so only one atomicAdd per warp is issued (blockIdx.x == 0 guard).
+ *
+ * Grid:
+ *   gridDim.x = (inputDim  + blockDim.x - 1) / blockDim.x  — input-dimension tiles
+ *   gridDim.y = (outputDim + blockDim.y - 1) / blockDim.y  — output-dimension tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedOutputGrad [blockDim.y * blockDim.x]  — tile of outputGrad rows
+ *   sharedInput      [blockDim.x * blockDim.y]  — tile of input rows (transposed load)
+ * Total shared: 2 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * @tparam DType Floating-point data type.
+ *
+ * @param input       Device pointer (read);              shape [batchSize, inputDim].
+ * @param outputGrad  Device pointer (read);              shape [batchSize, outputDim].
+ *                    Upstream gradient dL/d(output).
+ * @param weightsGrad Device pointer (accumulate via atomicAdd); shape [outputDim, inputDim].
+ * @param biasesGrad  Device pointer (accumulate via atomicAdd, nullable); shape [outputDim].
+ *                    Pass nullptr to skip bias gradient.
+ * @param inputDim    Number of input features.
+ * @param outputDim   Number of output features.
+ * @param batchSize   Number of rows.
  */
 template <typename DType = float> __global__ void linearBackwardWB(
     const DType *input,
@@ -134,17 +169,32 @@ template <typename DType = float> __global__ void linearBackwardWB(
 }
 
 /**
- * @brief Backward pass for Linear layer input grad.
- * 
- * Computes grad with respect to input by multiplying output grad with transposed weights.
- * 
- * @tparam DType The data type for computations.
- * @param inputGrad Pointer to accumulate input grad [batchSize, inputDim].
- * @param outputGrad Pointer to the grad from the next layer [batchSize, outputDim].
- * @param weights Pointer to the layer weights [outputDim, inputDim].
- * @param inputDim Number of input features.
- * @param outputDim Number of output features.
- * @param batchSize Number of examples in the batch.
+ * @brief Backward pass for Linear layer: computes input gradient.
+ *
+ * Computes dL/dinput[row, col] = Σ_k outputGrad[row, k] * weights[k, col],
+ * which is the matrix product outputGrad × W.  Uses BLOCKDIM×BLOCKDIM shared-memory
+ * tiles over the outputDim reduction axis.  Result is accumulated via atomicAdd.
+ *
+ * Grid:
+ *   gridDim.x = (inputDim  + blockDim.x - 1) / blockDim.x  — input-column tiles
+ *   gridDim.y = (batchSize + blockDim.y - 1) / blockDim.y  — row tiles
+ * Block: (blockDim.x, blockDim.y)  —  typically (BLOCKDIM, BLOCKDIM)
+ *
+ * Shared memory layout (contiguous extern char[]):
+ *   sharedOutputGrad [blockDim.y * blockDim.x]  — tile of outputGrad columns
+ *   sharedWeights    [blockDim.x * blockDim.y]  — tile of weight rows (transposed load)
+ * Total shared: 2 * blockDim.x * blockDim.y * sizeof(DType)
+ *
+ * @tparam DType Floating-point data type.
+ *
+ * @param inputGrad   Device pointer (accumulate via atomicAdd); shape [batchSize, inputDim].
+ * @param outputGrad  Device pointer (read);  shape [batchSize, outputDim].
+ *                    Upstream gradient dL/d(output).
+ * @param weights     Device pointer (read);  shape [outputDim, inputDim].
+ *                    Same weight matrix used in the forward pass.
+ * @param inputDim    Number of input features.
+ * @param outputDim   Number of output features.
+ * @param batchSize   Number of rows.
  */
 template <typename DType = float> __global__ void linearBackward(
     DType *inputGrad,
