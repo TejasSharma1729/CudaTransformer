@@ -21,7 +21,7 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
      */
     MLPLayer(std::vector<Module<DType>> layers) : modelLayers(layers) { }
 
-    /** @brief Clones the MLP and all its sub-layers. */
+    /** @brief Clones (deep-copy) the MLP and all its sub-layers. */
     std::shared_ptr<Layer<DType>> clone() override {
         std::vector<Module<DType>> clonedLayers;
         for (auto layer : modelLayers) {
@@ -30,10 +30,16 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
         return std::make_shared<MLPLayer<DType>>(clonedLayers);
     }
 
-    /** @brief Sequential forward pass through all sub-layers. */
+    /** 
+     * @brief Sequential forward pass through all sub-layers.
+     * @param input The input tensor to the MLP.
+     * @return Tensor<DType> The output tensor after passing through all layers.
+     */
     Tensor<DType> forward(Tensor<DType> input) override {
         Tensor<DType> currentOutput = input;
-        for (auto layer : modelLayers) currentOutput = layer->forward(currentOutput);
+        for (auto layer : modelLayers) {
+            currentOutput = layer->forward(currentOutput);
+        }
         return currentOutput;
     }
 
@@ -53,15 +59,14 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
             if (checkpointPtr == nullptr) continue;
 
             std::vector<Tensor<DType>> activations(1, checkpointPtr->activationStorage);
-            checkpointPtr->clear(); // Clear checkpoint to free memory later on.
-            
-            for (int layerIdx = l + 1; layerIdx < lastLayerIdx; layerIdx++) {
+            for (int layerIdx = l; layerIdx < lastLayerIdx; layerIdx++) {
                 activations.push_back(modelLayers[layerIdx]->forward(activations.back()));
             }
             for (int layerIdx = lastLayerIdx - 1; layerIdx >= l; layerIdx--) {
                 propagatedGrad = modelLayers[layerIdx]->backward(activations[layerIdx - l], propagatedGrad);
             }
             lastLayerIdx = l;
+            checkpointPtr->clear(); // Clear checkpoint to free memory immediately after use.
         }
 
         // Handle the remaining (non-checkpointed) prefix
@@ -140,6 +145,19 @@ template <typename DType = float> struct MLPLayer : public Layer<DType> {
             }
         }
         return grads;
+    }
+
+    /**
+     * @brief Clears stored activations in all checkpoint layers to free memory.
+     * This is called after the backward pass to ensure that no stale activations remain.
+     */
+    void clear() {
+        for (auto& layer : modelLayers) {
+            auto checkpointPtr = std::dynamic_pointer_cast<CheckpointLayer<DType>>(layer);
+            if (checkpointPtr != nullptr) {
+                checkpointPtr->clear();
+            }
+        }
     }
 };
 

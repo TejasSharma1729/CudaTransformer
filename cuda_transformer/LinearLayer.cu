@@ -90,7 +90,7 @@ template <typename DType = float> struct LinearLayer : public Layer<DType> {
             totalBatchSize
         );
 
-        Tensor<DType> gradInput(input.shape().toVector());
+        Tensor<DType> gradInput(input.shape());
         dim3 inputGrid((inputDim + BLOCKDIM - 1) / BLOCKDIM, (totalBatchSize + BLOCKDIM - 1) / BLOCKDIM);
         linearBackward<DType><<<inputGrid, threadsPerBlock, 2 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
             gradInput.get(),

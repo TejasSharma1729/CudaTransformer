@@ -182,10 +182,10 @@ __device__ DType applyUnary(DType a, UnaryOp op) {
                 if constexpr (std::is_integral_v<DType>) return ~a; 
                 else return !a;
             case UnaryOp::INV: return (DType)1 / a;
-            case UnaryOp::EXP: return static_cast<DType>(exp(static_cast<double>(a)));
-            case UnaryOp::LOG: return static_cast<DType>(log(static_cast<double>(a)));
+            case UnaryOp::EXP: return static_cast<DType>(exp(static_cast<ComputeType<DType>>(a)));
+            case UnaryOp::LOG: return static_cast<DType>(log(static_cast<ComputeType<DType>>(a)));
             case UnaryOp::SQR: return a * a;
-            case UnaryOp::SQRT: return static_cast<DType>(sqrt(static_cast<double>(a)));
+            case UnaryOp::SQRT: return static_cast<DType>(sqrt(static_cast<ComputeType<DType>>(a)));
             default: return a;
         }
     }
@@ -246,7 +246,7 @@ __device__ DType applyBinary(DType a, DType b, BinaryOp op) {
             if constexpr (std::is_integral_v<DType>) return a % b; 
             else return static_cast<DType>(0);
         case BinaryOp::POW: 
-            return static_cast<DType>(pow(static_cast<double>(a), static_cast<double>(b)));
+            return static_cast<DType>(pow(static_cast<ComputeType<DType>>(a), static_cast<ComputeType<DType>>(b)));
         case BinaryOp::AND: 
             return static_cast<DType>(a && b);
         case BinaryOp::OR:  
@@ -628,7 +628,7 @@ __global__ void reduceKernel(
         
         if (op == ReductionOp::MEAN && count > 0) res /= (DType)count;
         if (op == ReductionOp::NORM_L2) {
-            res = static_cast<DType>(sqrt(static_cast<double>(res)));
+            res = static_cast<DType>(sqrt(static_cast<ComputeType<DType>>(res)));
         }
         dst[idx] = res;
     }

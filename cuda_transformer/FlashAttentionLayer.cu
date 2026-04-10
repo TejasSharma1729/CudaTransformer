@@ -11,8 +11,8 @@
  * @tparam DType The data type used for computations.
  */
 template <typename DType = float> struct FlashAttentionLayer {
-    int headDim = 1;
-    int numHeads = 1;
+    int headDim = 1; /// Dimension of each attention head.
+    int numHeads = 1; /// Number of attention heads.
 
     // Cached values from forward pass for backward
     std::shared_ptr<DType[]> cachedMaxScores = nullptr;
@@ -101,9 +101,9 @@ template <typename DType = float> struct FlashAttentionLayer {
         const Tensor<DType> &outputGrad
     ) {
         std::array<Tensor<DType>, 3> grads;
-        grads[0] = Tensor<DType>(queries.shape().toVector());
-        grads[1] = Tensor<DType>(keys.shape().toVector());
-        grads[2] = Tensor<DType>(values.shape().toVector());
+        grads[0] = Tensor<DType>(queries.shape());
+        grads[1] = Tensor<DType>(keys.shape());
+        grads[2] = Tensor<DType>(values.shape());
         int batchSize = queries.shape()[0];
         int sequenceLength = queries.shape()[2];
         

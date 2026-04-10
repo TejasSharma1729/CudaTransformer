@@ -6,8 +6,8 @@
 /**
  * @brief Forward pass for the Sigmoid activation: output[i] = 1 / (1 + exp(-input[i])).
  *
- * Each thread handles one element.  Computation is performed in double precision
- * to avoid overflow/underflow at extreme inputs, then cast back to DType.
+ * Each thread handles one element.  Intermediate arithmetic uses ComputeType<DType>
+ * (float for half/bfloat16/float; double when DType is double), then casts back to DType.
  *
  * Grid:
  *   gridDim.x = (inputDim       + blockDim.x - 1) / blockDim.x  — feature tiles
@@ -32,8 +32,9 @@ template <typename DType> __global__ void sigmoidForward(
     int featureIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int flatIdx    = blockIdx.y * inputDim + featureIdx;
     if (featureIdx < inputDim && blockIdx.y < totalBatchSize) {
-        double x = (double)input[flatIdx];
-        output[flatIdx] = (DType)(1.0 / (1.0 + exp(-x)));
+        using CT = ComputeType<DType>;
+        CT x = (CT)input[flatIdx];
+        output[flatIdx] = (DType)((CT)1 / ((CT)1 + exp(-x)));
     }
 }
 
@@ -69,9 +70,10 @@ template <typename DType> __global__ void sigmoidBackward(
     int featureIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int flatIdx    = blockIdx.y * inputDim + featureIdx;
     if (featureIdx < inputDim && blockIdx.y < totalBatchSize) {
-        double x   = (double)input[flatIdx];
-        double sig = 1.0 / (1.0 + exp(-x));
-        gradInput[flatIdx] += (DType)(sig * (1.0 - sig) * (double)gradOutput[flatIdx]);
+        using CT = ComputeType<DType>;
+        CT x   = (CT)input[flatIdx];
+        CT sig = (CT)1 / ((CT)1 + exp(-x));
+        gradInput[flatIdx] += (DType)(sig * ((CT)1 - sig) * (CT)gradOutput[flatIdx]);
     }
 }
 

@@ -106,7 +106,7 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
         assert(D == inputDim);
         int N = input.size() / D;
         
-        Tensor<DType> output(input.shape().toVector());
+        Tensor<DType> output(input.shape());
 
         if (cachedN < N) {
             cache_mean = cudaMakeShared<DType>(N);
@@ -136,7 +136,7 @@ template <typename DType = float> struct LayerNormLayer : public Layer<DType> {
         int D = input.shape()[input.nDim() - 1];
         int N = input.size() / D;
         
-        Tensor<DType> gradInput(input.shape().toVector());
+        Tensor<DType> gradInput(input.shape());
 
         int threads = 256;
         size_t smem = 2 * threads * sizeof(DType);

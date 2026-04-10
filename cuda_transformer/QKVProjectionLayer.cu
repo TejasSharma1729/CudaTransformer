@@ -13,24 +13,24 @@
  * @tparam DType The data type used for computations.
  */
 template <typename DType = float> struct QKVProjectionLayer {
-    std::shared_ptr<DType[]> weightsQuery = nullptr;
-    std::shared_ptr<DType[]> weightsQueryGrad = nullptr;
-    std::shared_ptr<DType[]> biasesQuery = nullptr;
-    std::shared_ptr<DType[]> biasesQueryGrad = nullptr;
+    std::shared_ptr<DType[]> weightsQuery = nullptr; /// Weight matrix for query projection [inputDim, headDim * numHeads].
+    std::shared_ptr<DType[]> weightsQueryGrad = nullptr; /// Accumulated gradient for query weights.
+    std::shared_ptr<DType[]> biasesQuery = nullptr; /// Bias vector for query projection [headDim * numHeads].
+    std::shared_ptr<DType[]> biasesQueryGrad = nullptr; /// Accumulated gradient for query biases.
 
-    std::shared_ptr<DType[]> weightsKey = nullptr;
-    std::shared_ptr<DType[]> weightsKeyGrad = nullptr;
-    std::shared_ptr<DType[]> biasesKey = nullptr;
-    std::shared_ptr<DType[]> biasesKeyGrad = nullptr;
+    std::shared_ptr<DType[]> weightsKey = nullptr; /// Weight matrix for key projection [inputDim, headDim * numHeads].
+    std::shared_ptr<DType[]> weightsKeyGrad = nullptr; /// Accumulated gradient for key weights.
+    std::shared_ptr<DType[]> biasesKey = nullptr; /// Bias vector for key projection [headDim * numHeads].
+    std::shared_ptr<DType[]> biasesKeyGrad = nullptr; /// Accumulated gradient for key biases.
 
-    std::shared_ptr<DType[]> weightsValue = nullptr;
-    std::shared_ptr<DType[]> weightsValueGrad = nullptr;
-    std::shared_ptr<DType[]> biasesValue = nullptr;
-    std::shared_ptr<DType[]> biasesValueGrad = nullptr;
+    std::shared_ptr<DType[]> weightsValue = nullptr; /// Weight matrix for value projection [inputDim, headDim * numHeads].
+    std::shared_ptr<DType[]> weightsValueGrad = nullptr; /// Accumulated gradient for value weights.
+    std::shared_ptr<DType[]> biasesValue = nullptr; /// Bias vector for value projection [headDim * numHeads].
+    std::shared_ptr<DType[]> biasesValueGrad = nullptr; /// Accumulated gradient for value biases.
 
-    int inputDim = 1;
-    int numHeads = 1;
-    int headDim = 1;
+    int inputDim = 1; /// Size of the input feature space.
+    int numHeads = 1; /// Number of attention heads.
+    int headDim = 1; /// Dimension of each attention head (inputDim / numHeads).
 
     /**
      * @brief Constructs a QKVProjectionLayer.

@@ -2,45 +2,45 @@ import numpy as np, torch, time
 from numpy import array, ndarray, linalg, random as npr
 from torch import nn, tensor, Tensor, optim
 
-from cuda_transformer import FloatTensor, MLPFloat, LinearFloat, ActivationFloat, CheckpointFloat, FloatMSELoss, ActivationType
+from cuda_transformer import DoubleTensor, MLPDouble, LinearDouble, ActivationDouble, CheckpointDouble, DoubleMSELoss, ActivationType
 
 
-W1 = torch.randn(1024, 2048).cuda() / np.sqrt(1024)
-W2 = torch.randn(2048, 2048).cuda() / np.sqrt(2048)
-W3 = torch.randn(2048, 2048).cuda() / np.sqrt(2048)
-W4 = torch.randn(2048, 512).cuda() / np.sqrt(2048)
+W1 = torch.randn(1024, 2048).double().cuda() / np.sqrt(1024)
+W2 = torch.randn(2048, 2048).double().cuda() / np.sqrt(2048)
+W3 = torch.randn(2048, 2048).double().cuda() / np.sqrt(2048)
+W4 = torch.randn(2048, 512).double().cuda() / np.sqrt(2048)
 
-mlp = MLPFloat([
-    LinearFloat(1024, 2048),
-    ActivationFloat(2048, ActivationType.ReLU),
-    LinearFloat(2048, 2048),
-    ActivationFloat(2048, ActivationType.ReLU),
-    LinearFloat(2048, 2048),
-    ActivationFloat(2048, ActivationType.ReLU),
-    LinearFloat(2048, 512),
+mlp = MLPDouble([
+    LinearDouble(1024, 2048),
+    ActivationDouble(2048, ActivationType.ReLU),
+    LinearDouble(2048, 2048),
+    ActivationDouble(2048, ActivationType.ReLU),
+    LinearDouble(2048, 2048),
+    ActivationDouble(2048, ActivationType.ReLU),
+    LinearDouble(2048, 512),
 ])
 mlp.setParameters({
-    "layer_0.weights": FloatTensor.fromNumpy(W1.T.contiguous().cpu().numpy()),
-    "layer_2.weights": FloatTensor.fromNumpy(W2.T.contiguous().cpu().numpy()),
-    "layer_4.weights": FloatTensor.fromNumpy(W3.T.contiguous().cpu().numpy()),
-    "layer_6.weights": FloatTensor.fromNumpy(W4.T.contiguous().cpu().numpy()),
+    "layer_0.weights": DoubleTensor.fromNumpy(W1.T.contiguous().cpu().numpy()),
+    "layer_2.weights": DoubleTensor.fromNumpy(W2.T.contiguous().cpu().numpy()),
+    "layer_4.weights": DoubleTensor.fromNumpy(W3.T.contiguous().cpu().numpy()),
+    "layer_6.weights": DoubleTensor.fromNumpy(W4.T.contiguous().cpu().numpy()),
 })
 
-mlp_checkpoint = MLPFloat([
-    LinearFloat(1024, 2048),
-    ActivationFloat(2048, ActivationType.ReLU),
-    LinearFloat(2048, 2048),
-    ActivationFloat(2048, ActivationType.ReLU),
-    CheckpointFloat(),
-    LinearFloat(2048, 2048),
-    ActivationFloat(2048, ActivationType.ReLU),
-    LinearFloat(2048, 512),
+mlp_checkpoint = MLPDouble([
+    LinearDouble(1024, 2048),
+    ActivationDouble(2048, ActivationType.ReLU),
+    LinearDouble(2048, 2048),
+    ActivationDouble(2048, ActivationType.ReLU),
+    CheckpointDouble(),
+    LinearDouble(2048, 2048),
+    ActivationDouble(2048, ActivationType.ReLU),
+    LinearDouble(2048, 512),
 ])
 mlp_checkpoint.setParameters({
-    "layer_0.weights": FloatTensor.fromNumpy(W1.T.contiguous().cpu().numpy()),
-    "layer_2.weights": FloatTensor.fromNumpy(W2.T.contiguous().cpu().numpy()),
-    "layer_5.weights": FloatTensor.fromNumpy(W3.T.contiguous().cpu().numpy()),
-    "layer_7.weights": FloatTensor.fromNumpy(W4.T.contiguous().cpu().numpy()),
+    "layer_0.weights": DoubleTensor.fromNumpy(W1.T.contiguous().cpu().numpy()),
+    "layer_2.weights": DoubleTensor.fromNumpy(W2.T.contiguous().cpu().numpy()),
+    "layer_5.weights": DoubleTensor.fromNumpy(W3.T.contiguous().cpu().numpy()),
+    "layer_7.weights": DoubleTensor.fromNumpy(W4.T.contiguous().cpu().numpy()),
 })
 
 torch_mlp = nn.ModuleList([
@@ -51,7 +51,7 @@ torch_mlp = nn.ModuleList([
     nn.Linear(2048, 2048),
     nn.ReLU(),
     nn.Linear(2048, 512),
-]).cuda()
+]).double().cuda()
 torch_mlp[0].weight.data = W1.T.contiguous().detach()
 torch_mlp[2].weight.data = W2.T.contiguous().detach()
 torch_mlp[4].weight.data = W3.T.contiguous().detach()
@@ -62,15 +62,15 @@ torch_mlp[2].bias.data.fill_(0) # type: ignore
 torch_mlp[4].bias.data.fill_(0) # type: ignore
 torch_mlp[6].bias.data.fill_(0) # type: ignore
 
-loss_fn = nn.MSELoss(reduction='mean').cuda()
-loss_mlp = FloatMSELoss()
+loss_fn = nn.MSELoss(reduction='mean').double().cuda()
+loss_mlp = DoubleMSELoss()
 optimizer = optim.SGD(torch_mlp.parameters(), lr=0.01)
 optimizer.zero_grad()
 
-X = torch.randn(1024, 1024).cuda()
-Y = torch.randn(1024, 512).cuda()
-X_in = FloatTensor.fromNumpy(X.cpu().numpy()) # type: ignore
-Y_in = FloatTensor.fromNumpy(Y.cpu().numpy()) # type: ignore
+X = torch.randn(1024, 1024).double().cuda()
+Y = torch.randn(1024, 512).double().cuda()
+X_in = DoubleTensor.fromNumpy(X.cpu().numpy()) # type: ignore
+Y_in = DoubleTensor.fromNumpy(Y.cpu().numpy()) # type: ignore
 X.requires_grad_(True)
 Y.requires_grad_(True)
 

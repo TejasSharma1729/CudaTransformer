@@ -8,12 +8,12 @@
  */
 template <typename DType = float> struct TransformerLayer : public Layer<DType> {
     std::vector<Module<DType>> modelLayers; ///< List of transformer blocks and checkpoints.
-    int inputDim = 1;
-    int numHeads = 1;
-    int headDim = 1;
-    int mlpDim = 1;
-    int numLayers = 1;
-    int checkpointGap = 1;
+    int inputDim = 1; /// Size of input features and embeddings.
+    int numHeads = 1; /// Number of attention heads.
+    int headDim = 1; /// Dimension of each attention head.
+    int mlpDim = 1; /// Hidden dimension of the MLP sub-layer in each block.
+    int numLayers = 1; /// Number of transformer blocks in the model.
+    int checkpointGap = 1; /// Number of layers between gradient checkpoints (0 for no checkpointing).
     ActivationType activationType = ActivationType::ReLU; ///< Activation function for MLP sub-layers.
 
     /**
@@ -83,7 +83,7 @@ template <typename DType = float> struct TransformerLayer : public Layer<DType> 
             if (checkpointPtr == nullptr) continue;
             std::vector<Tensor<DType>> activations(1, checkpointPtr->activationStorage);
             std::vector<Tensor<DType>*> attentionStatesObj(lastLayerIdx - l - 1);
-            checkPointPtr->clear(); // Clear checkpoint to free memory later on.
+            checkpointPtr->clear(); // Clear checkpoint to free memory later on.
 
             for (int layerIdx = l + 1; layerIdx < lastLayerIdx; layerIdx++) {
                 auto modelLayer = std::dynamic_pointer_cast<TransformerBlockLayer<DType>>(modelLayers[layerIdx]);
@@ -211,6 +211,19 @@ template <typename DType = float> struct TransformerLayer : public Layer<DType> 
             }
         }
         return grads;
+    }
+
+    /**
+     * @brief Clears stored activations in all checkpoint layers to free memory.
+     * This is called after the backward pass to ensure that no stale activations remain.
+     */
+    void clear() {
+        for (auto& layer : modelLayers) {
+            auto checkpointPtr = std::dynamic_pointer_cast<CheckpointLayer<DType>>(layer);
+            if (checkpointPtr != nullptr) {
+                checkpointPtr->clear();
+            }
+        }
     }
 };
 

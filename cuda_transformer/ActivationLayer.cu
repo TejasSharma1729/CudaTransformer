@@ -46,7 +46,7 @@ template <typename DType = float> struct ActivationLayer : public Layer<DType> {
      */
     Tensor<DType> forward(Tensor<DType> input) override {
         assert(input.shape()[input.nDim() - 1] == (size_t)inputDim);
-        Tensor<DType> output(input.shape().toVector());
+        Tensor<DType> output(input.shape());
         int totalBatch = output.size() / inputDim;
         dim3 grid((inputDim + 255) / 256, totalBatch);
 
@@ -74,7 +74,7 @@ template <typename DType = float> struct ActivationLayer : public Layer<DType> {
      * @return Gradient tensor of the same shape with the activation applied elementwise.
      */
     Tensor<DType> backward(Tensor<DType> input, Tensor<DType> gradOutput) override {
-        Tensor<DType> gradInput(gradOutput.shape().toVector());
+        Tensor<DType> gradInput(gradOutput.shape());
         int totalBatch = gradOutput.size() / inputDim;
         dim3 grid((inputDim + 255) / 256, totalBatch);
 

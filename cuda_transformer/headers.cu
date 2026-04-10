@@ -29,6 +29,25 @@ typedef half float16_t;
 #define HEADERS
 
 /**
+ * @brief Compute type for intermediate kernel arithmetic.
+ *
+ * Selects the precision used for intermediate computations inside CUDA kernels:
+ *   - __half and __nv_bfloat16 (2 bytes) → float   (avoids severe FP64 penalty on
+ *     consumer GPUs while accumulating above storage precision; cuBLAS / cuDNN follow
+ *     the same convention)
+ *   - float                               → float
+ *   - double                              → double  (preserves caller intent)
+ *
+ * Usage in a kernel:
+ *   using CT = ComputeType<DType>;
+ *   CT x = (CT)input[i];
+ *   ...
+ *   output[i] = (DType)result;
+ */
+template <typename DType>
+using ComputeType = std::conditional_t<(sizeof(DType) <= sizeof(float)), float, double>;
+
+/**
  * @brief Enumeration of the supported element-wise unary operations.
  */
 enum class UnaryOp { NEG, NOT, INV, EXP, LOG, SQR, SQRT };

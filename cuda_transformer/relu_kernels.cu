@@ -33,7 +33,7 @@ template <typename DType = float> __global__ void reluForward(
     int featureIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int flatIdx = blockIdx.y * inputDim + featureIdx;
     if (featureIdx < inputDim && blockIdx.y < totalBatchSize) {
-        output[flatIdx] = input[flatIdx] > static_cast<DType>(0) ? input[flatIdx] : static_cast<DType>(0);
+        output[flatIdx] = input[flatIdx] > (DType)0 ? input[flatIdx] : (DType)0;
     }
 }
 

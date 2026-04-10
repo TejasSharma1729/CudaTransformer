@@ -20,13 +20,13 @@
  * @tparam DType Floating-point data type (float, double, __half, __nv_bfloat16).
  */
 template <typename DType = float> struct Softmax {
-    DType temperature = (DType)1.0; ///< Temperature for scaling logits before exponentiation.
+    double temperature = 1.0; /// Temperature for scaling logits before exponentiation.
 
     /**
      * @brief Constructs a Softmax layer.
      * @param temperature Temperature parameter to scale the logits. Defaults to 1.0.
      */
-    Softmax(double temperature = 1.0) : temperature((DType)temperature) {}
+    Softmax(double temperature = 1.0) : temperature(temperature) {}
 
     /**
      * @brief Computes the forward pass of the Softmax layer.
@@ -89,13 +89,13 @@ template <typename DType = float> struct Softmax {
  * @tparam DType Floating-point data type.
  */
 template <typename DType = float> struct LogSoftmax {
-    DType temperature = (DType)1.0; ///< Temperature for scaling logits.
+    double temperature = 1.0; /// Temperature for scaling logits.
 
     /**
      * @brief Constructs a LogSoftmax layer.
      * @param temperature Temperature parameter to scale the logits. Defaults to 1.0.
      */
-    LogSoftmax(double temperature = 1.0) : temperature((DType)temperature) {}
+    LogSoftmax(double temperature = 1.0) : temperature(temperature) {}
 
     /**
      * @brief Computes the forward pass of the LogSoftmax layer.
@@ -108,7 +108,7 @@ template <typename DType = float> struct LogSoftmax {
         int totalBatchSize = input.size() / embeddingDim;
         int threadsPerBlock = 256;
         int numBlocks = (totalBatchSize + threadsPerBlock - 1) / threadsPerBlock;
-        softmaxKernel<<<numBlocks, threadsPerBlock>>>(
+        softmaxKernel<DType><<<numBlocks, threadsPerBlock>>>(
             input.get(), output.get(), embeddingDim, totalBatchSize, temperature, true
         );
         return output;
@@ -135,7 +135,7 @@ template <typename DType = float> struct LogSoftmax {
         int totalBatchSize = input.size() / embeddingDim;
         int threadsPerBlock = 256;
         int numBlocks = (totalBatchSize + threadsPerBlock - 1) / threadsPerBlock;
-        softmaxBackwardKernel<<<numBlocks, threadsPerBlock>>>(
+        softmaxBackwardKernel<DType><<<numBlocks, threadsPerBlock>>>(
             input.get(), gradOutput.get(), gradInput.get(), embeddingDim, totalBatchSize, temperature, true
         );
         return gradInput;
@@ -174,7 +174,7 @@ template <typename DType = float, typename IdType = int> struct CrossEntropyLoss
         int totalBatchSize = input.size() / embeddingDim;
         int threadsPerBlock = 256;
         int numBlocks = (totalBatchSize + threadsPerBlock - 1) / threadsPerBlock;
-        crossEntropyLossForwardKernel<<<numBlocks, threadsPerBlock>>>(
+        crossEntropyLossKernel<DType><<<numBlocks, threadsPerBlock>>>(
             input.get(), target.get(), lossOutput.get(), embeddingDim, totalBatchSize
         );
         return lossOutput;
@@ -202,7 +202,7 @@ template <typename DType = float, typename IdType = int> struct CrossEntropyLoss
         int totalBatchSize = input.size() / embeddingDim;
         int threadsPerBlock = 256;
         int numBlocks = (totalBatchSize + threadsPerBlock - 1) / threadsPerBlock;
-        crossEntropyLossBackwardKernel<<<numBlocks, threadsPerBlock>>>(
+        crossEntropyLossBackwardKernel<DType><<<numBlocks, threadsPerBlock>>>(
             input.get(), target.get(), gradInput.get(), embeddingDim, totalBatchSize
         );
         return gradInput;

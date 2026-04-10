@@ -7,8 +7,8 @@
 /**
  * @brief Forward pass for the Tanh activation: output[i] = tanh(input[i]).
  *
- * Each thread handles one element.  Computation uses double precision tanh
- * for accuracy before casting back to DType.
+ * Each thread handles one element.  Intermediate arithmetic uses ComputeType<DType>
+ * (float for half/bfloat16/float; double when DType is double), then casts back to DType.
  *
  * Grid:
  *   gridDim.x = (inputDim       + blockDim.x - 1) / blockDim.x  — feature tiles
@@ -33,7 +33,7 @@ template <typename DType> __global__ void tanhForward(
     int featureIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int flatIdx    = blockIdx.y * inputDim + featureIdx;
     if (featureIdx < inputDim && blockIdx.y < totalBatchSize) {
-        output[flatIdx] = (DType)tanh((double)input[flatIdx]);
+        output[flatIdx] = (DType)tanh((ComputeType<DType>)input[flatIdx]);
     }
 }
 
@@ -69,8 +69,9 @@ template <typename DType> __global__ void tanhBackward(
     int featureIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int flatIdx    = blockIdx.y * inputDim + featureIdx;
     if (featureIdx < inputDim && blockIdx.y < totalBatchSize) {
-        double t = tanh((double)input[flatIdx]);
-        gradInput[flatIdx] += (DType)((1.0 - t * t) * (double)gradOutput[flatIdx]);
+        using CT = ComputeType<DType>;
+        CT t = tanh((CT)input[flatIdx]);
+        gradInput[flatIdx] += (DType)(((CT)1 - t * t) * (CT)gradOutput[flatIdx]);
     }
 }
 

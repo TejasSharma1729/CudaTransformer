@@ -5,6 +5,7 @@
 /**
  * @brief Central interface defining robust N-Dimensional arbitrary computational matrix relationships.
  * Generates dynamic device mappings bridging native scalable GPU evaluation seamlessly from user layers.
+ * @tparam DType Data type of the tensor elements, supporting various numeric types for flexibility.
  */
 template <typename DType = float>
 class Tensor {
@@ -33,6 +34,19 @@ public:
      * @param value Initial default constant inherently occupying raw parameter space identically logically.
      */
     Tensor(const std::vector<size_t> &s, DType value = 0) : shape_(s) {
+        size_ = 1;
+        for (size_t i = 0; i < shape_.nDim; ++i) {
+            size_ *= shape_[i];
+        }
+        data_ = cudaMakeShared<DType>(size_, value);
+    }
+
+    /**
+     * @brief Constructs natively explicit contiguous 1-Dimensional bounds saturated instantly symmetrically.
+     * @param s The geometric boundary constraint governing absolute total volume.
+     * @param value Default raw filling block saturating allocated bounds inherently.
+     */
+    Tensor(const Shape8 &s, DType value = 0) : shape_(s) {
         size_ = 1;
         for (size_t i = 0; i < shape_.nDim; ++i) {
             size_ *= shape_[i];
@@ -246,12 +260,10 @@ public:
 
     /**
      * @brief Transforms exactly mirrored native internal data structures strictly conforming directly to new requested precisions dynamically.
+     * @tparam NewDType The new data type to convert the tensor elements to, supporting various numeric types for flexibility.
      * @return Tensor<NewDType> The thoroughly transformed completely type-safe array.
      */
     template <typename NewDType>
-    /**
-     * @brief Execute to operation.
-     */
     Tensor<NewDType> to() const {
         Tensor<NewDType> result(shape_.toVector());
         if (size_ > 0) {
@@ -276,8 +288,8 @@ public:
      * @brief Transient internal assignment encapsulation managing structural scalar variable injection dynamically.
      */
     struct TensorElemAssign_ {
-        Tensor *tensor;
-        std::vector<size_t> indices;
+        Tensor *tensor; /// Pointer to the parent tensor being accessed or modified.
+        std::vector<size_t> indices; /// The multi-dimensional indices specifying the element location within the tensor.   
         
         /**
          * @brief Evaluates inherently explicit bounding geometry implicitly identifying values statically.
@@ -480,16 +492,33 @@ public:
         set(view, val);
     }
 
+    /** @brief Transient internal assignment structure for tensor views. */
     struct TensorAssignment_ {
-        Tensor &tensor;
-        TensorView view;
+        Tensor &tensor; // Reference to the parent tensor being accessed or modified.
+        TensorView view; // The view specifying the subset of the tensor being accessed or modified.
+
+        /** 
+         * @brief Constructor for the tensor assignment structure.
+         * @param t Reference to the parent tensor being accessed or modified.
+         * @param v The view specifying the subset of the tensor being accessed or modified.
+        */
         TensorAssignment_(Tensor &t, const TensorView &v) : tensor(t), view(v) {}
         
+        /**
+         * @brief Assignment operator for assigning a tensor to the view.
+         * @param val The tensor to be assigned to the view.
+         * @return Tensor The resulting tensor slice after assignment.
+         */
         Tensor operator=(const Tensor &val) {
             tensor.set(view, val);
             return tensor.getSlice(view);
         }
         
+        /**
+         * @brief Assignment operator for assigning a scalar to the view.
+         * @param value The scalar value to be assigned to the view.
+         * @return Tensor The resulting tensor slice after assignment.
+         */
         Tensor operator=(DType value) {
             tensor.set(view, value);
             return tensor.getSlice(view);
@@ -513,6 +542,7 @@ public:
 
     /**
      * @brief Translates structural matrix arrays safely mimicking intrinsic parameters seamlessly.
+     * @param newShape The new shape to reshape the tensor to, must have the same total number of elements as the original shape.
      */
     Tensor reshape(
         const std::vector<size_t> &newShape /*!< @param newShape Complete vector capturing total volume dimension bounds */
@@ -530,7 +560,19 @@ public:
     }
 
     /**
+     * @brief Reshapes the tensor to a new shape.
+     * @param newShape The new shape to reshape the tensor to, must have the same total number of elements as the original shape.
+     * @return Tensor The reshaped tensor.
+     */
+    Tensor reshape(
+        const Shape8 newShape /*!< @param newShape Complete Shape8 capturing total volume dimension bounds */
+    ) const {
+        return reshape(newShape.toVector());
+    }
+
+    /**
      * @brief Inverses strict geometric ordering rigorously passing heavily decoupled dimensions safely.
+     * @param perm The permutation of the dimensions specifying the new order, must be a valid permutation of [0, 1, ..., n-1] where n is the number of dimensions.
      */
     Tensor transpose(
         const std::vector<size_t> &perm /*!< @param perm Geometric order of sequence indices mapping new dimensions */
@@ -556,6 +598,12 @@ public:
         return result;
     }
 
+    /**
+     * @brief Transposes the tensor by swapping two specified axes.
+     * @param axis1 The first axis to swap.
+     * @param axis2 The second axis to swap.
+     * @return Tensor The transposed tensor with the specified axes swapped.
+     */
     Tensor transpose(
         size_t axis1 /*!< @param axis1 Root axis */, 
         size_t axis2 /*!< @param axis2 Target axis */
@@ -570,6 +618,8 @@ public:
 
     /**
      * @brief Automatically sweeps explicitly calculated geometric operators scaling universally identically.
+     * @param op The unary operation to apply to each element of the tensor, specified as a UnaryOp enum value.
+     * @return Tensor The resulting tensor after applying the unary operation to each element.
      */
     Tensor unary(
         UnaryOp op /*!< @param op Single-parameter mathematical transformation map */
@@ -589,6 +639,11 @@ public:
 
     /**
      * @brief Broadly binds identically topological mappings converting intrinsic mathematical values safely.
+     * @param other The other tensor to perform the binary operation with, must be broadcastable to the same shape as this tensor.
+     * @param op The binary operation to apply element-wise between this tensor and the other tensor, 
+     * specified as a BinaryOp enum value.
+     * @return Tensor The resulting tensor after applying the binary operation element-wise between 
+     * this tensor and the other tensor, with broadcasting applied as necessary.
      */
     Tensor binary(
         const Tensor &other /*!< @param other Operative geometric partner matrix */, 
@@ -676,6 +731,11 @@ public:
 
     /**
      * @brief Dynamically translates universally structured standalone values binding deeply efficiently.
+     * @param other The scalar value to perform the binary operation with, will be broadcasted to the same shape as this tensor.
+     * @param op The binary operation to apply element-wise between this tensor and the scalar value, 
+     * specified as a BinaryOp enum value.
+     * @param scalar_on_left Specifies if the scalar is the left operand (scalar op tensor) or 
+     * the right operand (tensor op scalar), default is 0 (tensor op scalar).
      */
     Tensor binary(
         DType other /*!< @param other Explicit primitive scalar */, 
@@ -811,6 +871,8 @@ public:
 
     /**
      * @brief Binds mathematically inherently expansive tensor relationships efficiently securely.
+     * @param other The other tensor to perform the Kronecker product with, must have the same number of dimensions as this tensor.
+     * @return Tensor The resulting tensor after performing the Kronecker product between this tensor and the other tensor.
      */
     Tensor kron(
         const Tensor &other /*!< @param other Operative scaling geometry capturing Cartesian bounds safely systematically */
@@ -848,6 +910,9 @@ public:
 
     /**
      * @brief Computes generalized batched dimensional Matrix Multiplications safely isolating buffers natively.
+     * @param o The other tensor to perform the matrix multiplication with, must have at least 2 dimensions and 
+     * compatible inner dimensions for multiplication.
+     * @return Tensor The resulting tensor after performing the matrix multiplication between this tensor and the other tensor.
      */
     Tensor matmul(
         const Tensor &o /*!< @param o Structural mapping vector array natively capturing explicit parameter limits flawlessly */

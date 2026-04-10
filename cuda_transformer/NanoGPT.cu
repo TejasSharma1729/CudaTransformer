@@ -7,7 +7,7 @@
 
 
 /** @brief Enum for specifying the sampling mode during inference. */
-enum SamplingMode { Greedy, Random, Nucleus, TopK };
+enum class SamplingMode { Greedy, Random, Nucleus, TopK };
 // Not supported: beam search, 
 
 
@@ -89,7 +89,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
         embeddings = preUnembeddingCheckpoint(embeddings);
         Tensor<DType> preLogits = unEmbedding(embeddings);
 
-        inputShape.push_back(vocabSize());
+        inputShape.push_back((size_t)vocabSize());
         return softmax(preLogits).reshape(inputShape); // Reshape back to [batch, seqLen, vocabSize]
     }
 
@@ -216,7 +216,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     ) {
         assert(input.nDim() == 1); // Only support 1D input for sampling
         Tensor<DType> logits = forward(input);
-        logits.reshape({input.shape(0), vocabSize()}); // Ensure logits are in shape [seqLen, vocabSize]
+        logits.reshape({input.shape(0), (size_t)vocabSize()}); // Ensure logits are in shape [seqLen, vocabSize]
         return predict(logits, mode, K, P);
     }
 
@@ -357,7 +357,7 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     void backward(Tensor<IdType> input, Tensor<DType> logits, Tensor<IdType> target) {
         std::vector<size_t> inputShape = input.shape().toVector();
         input.reshape({input.size() / inputShape.back(), inputShape.back()});
-        inputShape.push_back(vocabSize());
+        inputShape.push_back((size_t)vocabSize());
         logits.reshape(inputShape);
 
         // Now with proper shapes, get all required tensors.
@@ -460,69 +460,11 @@ template <typename DType = float, typename IdType = int> struct NanoGPT {
     }
 
     /**
-     * @brief A full training loop that takes in a dataset of input token IDs, batch size, number of epochs, and learning rate.
-     * The training loop will iterate over the dataset for the specified number of epochs,
-     * performing forward passes, computing loss, backward passes, and parameter updates using SGD. 
-     * @param input A vector of token IDs representing the training dataset (should be a long sequence of tokens).
-     * @param batchSize Number of sequences to process in each training batch.
-     * @param numEpochs Number of times to iterate over the entire dataset.
-     * @param learningRate Learning rate for the SGD updates.
-     * @note The input dataset is expected to be a long sequence of token IDs, and the
-     * training loop will create batches by sampling random contiguous segments of the input sequence.
+     * @brief Clear all the stored checkpoint activations in the model to free up memory.
+     * This should be called after the backward pass is complete and the gradients have been used for updates.
      */
-    void train(std::vector<IdType> input, int batchSize, int numEpochs, DType learningRate) {
-        // A huge batch of inputs, all random ranges.
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(0, input.size() - batchSize - 1);
-        std::cout << "Training for " << numEpochs << " epochs with batch size " << batchSize << " and learning rate " << (double)learningRate << std::endl;
-
-        for (size_t epoch = 0; epoch < numEpochs; epoch++) {
-            std::vector<IdType> batchInput(batchSize * maxSeqLen());
-            std::vector<IdType> batchTarget(batchSize * maxSeqLen());
-            for (size_t batch = 0; batch < batchSize; batch++) {
-                // Fill batchInput and batchTarget with data from input
-                size_t startIdx = dis(gen);
-                for (size_t i = 0; i < maxSeqLen(); i++) {
-                    batchInput[batch * maxSeqLen() + i] = input[startIdx + i];
-                    batchTarget[batch * maxSeqLen() + i] = input[startIdx + i + 1];
-                }
-            }
-            Tensor<IdType> inputTensor = Tensor<IdType>::fromPointer({(size_t)batchSize, (size_t)maxSeqLen()}, batchInput.data());
-            Tensor<IdType> targetTensor = Tensor<IdType>::fromPointer({(size_t)batchSize, (size_t)maxSeqLen()}, batchTarget.data());
-            Tensor<DType> logits = forward(inputTensor);
-            Tensor<DType> loss = crossEntropyLoss(logits, targetTensor);
-            backward(inputTensor, logits, targetTensor);
-            sgdUpdate(learningRate);
-
-            double netLoss = (double)0.0;
-            std::vector<DType> hostLoss = loss.cpu();
-            for (const auto& l : hostLoss) {
-                netLoss += (double)l;
-            }
-            std::cout << "\rEpoch " << epoch + 1 << "/" << numEpochs << ", Loss: " << netLoss << std::flush;
-        }
-        std::cout << std::endl;
-    }
-
-    /**
-     * @brief A full training loop that takes in a dataset of input token IDs as a 1D numpy array, 
-     * the batch size, number of epochs, and learning rate.
-     * The training loop will iterate over the dataset for the specified number of epochs,
-     * performing forward passes, computing loss, backward passes, and parameter updates using SGD.
-     * @param input A 1D array of token IDs representing the training dataset (should be a long sequence of tokens).
-     * @param batchSize Number of sequences to process in each training batch.
-     * @param numEpochs Number of times to iterate over the entire dataset.
-     * @param learningRate Learning rate for the SGD updates.
-     * @note The input dataset is expected to be a long sequence of token IDs, and the training loop will 
-     * create batches by sampling random contiguous segments of the input sequence.
-     */
-    void train(pybind11::array_t<IdType> input, int batchSize, int numEpochs, DType learningRate) {
-        std::vector<IdType> inputVec(input.size()); // assume a 1D huge array of tokens.
-        for (ssize_t i = 0; i < input.size(); i++) {
-            inputVec[i] = input.data()[i];
-        }
-        train(inputVec, batchSize, numEpochs, learningRate);
+    void clear() {
+        transformerLayer.clear();
     }
 };
 

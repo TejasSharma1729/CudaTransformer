@@ -11,14 +11,14 @@
  * @tparam DType The data type used for computations.
  */
 template <typename DType = float> struct OutputProjectionLayer {
-    std::shared_ptr<DType[]> weightsProj = nullptr;
-    std::shared_ptr<DType[]> weightsProjGrad = nullptr;
-    std::shared_ptr<DType[]> biasesProj = nullptr;
-    std::shared_ptr<DType[]> biasesProjGrad = nullptr;
+    std::shared_ptr<DType[]> weightsProj = nullptr; /// Projection weights [head_dim * num_heads, input_dim].
+    std::shared_ptr<DType[]> weightsProjGrad = nullptr; /// Gradient of projection weights.
+    std::shared_ptr<DType[]> biasesProj = nullptr; /// Projection biases [input_dim].
+    std::shared_ptr<DType[]> biasesProjGrad = nullptr; /// Gradient of projection biases.
 
-    int inputDim = 1;
-    int headDim = 1;
-    int numHeads = 1;
+    int inputDim = 1; /// Size of the input feature space.
+    int headDim = 1; /// Dimension of each attention head.
+    int numHeads = 1; /// Number of attention heads.
 
     /**
      * @brief Constructs an OutputProjectionLayer.
@@ -86,7 +86,7 @@ template <typename DType = float> struct OutputProjectionLayer {
         );
 
         // Compute gradients w.r.t. input
-        Tensor<DType> inputGrad(input.shape().toVector());
+        Tensor<DType> inputGrad(input.shape());
         dim3 gridProj((totalHeadDim + BLOCKDIM - 1) / BLOCKDIM, (batchSize * sequenceLength + BLOCKDIM - 1) / BLOCKDIM);
         projBackward<DType><<<gridProj, threadsPerBlock, 2 * BLOCKDIM * BLOCKDIM * sizeof(DType)>>>(
             inputGrad.get(), gradOutput.get(), weightsProj.get(),

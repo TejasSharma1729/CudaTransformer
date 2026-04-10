@@ -113,7 +113,7 @@ template <typename DType = float> __global__ void flashAttention(
         for (int i = 0; i < headDim; i++) {
             score += tileQuery[threadIdx.y * headDim + i] * tileKey[threadIdx.x * headDim + i];
         }
-        score /= (DType)sqrt((double)(headDim));
+        score /= (DType)sqrt((ComputeType<DType>)(headDim));
         tileScores[threadIdx.y * blockDim.x + threadIdx.x] = score;
         __syncthreads();
 
@@ -128,8 +128,8 @@ template <typename DType = float> __global__ void flashAttention(
         }
         
         DType newMax = (DType)fmaxf((float)maxScore, (float)rowMax);
-        DType rescale = (DType)exp((double)maxScore - (double)newMax);
-        DType currentExp = (DType)exp((double)score - (double)newMax);
+        DType rescale = (DType)exp((ComputeType<DType>)maxScore - (ComputeType<DType>)newMax);
+        DType currentExp = (DType)exp((ComputeType<DType>)score - (ComputeType<DType>)newMax);
         tileScores[threadIdx.y * blockDim.x + threadIdx.x] = currentExp;
         __syncthreads();
 
@@ -295,8 +295,8 @@ template <typename DType = float> __global__ void flashAttentionBackward(
             dProd += tileOutputGrad[threadIdx.y * headDim + i] * tileValue[threadIdx.x * headDim + i];
         }
         score /= (DType)sqrt((double)(headDim));
-        score = (DType)exp((double)score - (double)maxScore) / denominator;
-        dProd = score * (dProd - delta) / (DType)sqrt((double)(headDim));
+        score = (DType)exp((ComputeType<DType>)score - (ComputeType<DType>)maxScore) / denominator;
+        dProd = score * (dProd - delta) / (DType)sqrt((ComputeType<DType>)(headDim));
         
         tileScores[threadIdx.y * blockDim.x + threadIdx.x] = score;
         tileProdGrad[threadIdx.y * blockDim.x + threadIdx.x] = dProd;

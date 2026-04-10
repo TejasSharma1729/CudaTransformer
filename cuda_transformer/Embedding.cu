@@ -385,7 +385,7 @@ struct UnEmbedding {
             totalBatchSize
         );
 
-        Tensor<DType> gradInput(input.shape().toVector());
+        Tensor<DType> gradInput(input.shape());
         blocksPerGrid = dim3((vocabSize + BLOCKDIM - 1) / BLOCKDIM, totalBatchSize);
         linearBackward<DType><<<blocksPerGrid, threadsPerBlock>>>(
             gradInput.get(),

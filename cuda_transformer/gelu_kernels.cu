@@ -9,7 +9,7 @@
  * Applies the tanh approximation of the Gaussian Error Linear Unit:
  *   output[i] = x * 0.5 * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))
  * where x = input[i].  This matches PyTorch's default GELU approximation.
- * All intermediate arithmetic is done in double precision for numerical stability.
+ * Intermediate arithmetic uses ComputeType<DType> (float for half/bfloat16/float; double for double).
  *
  * Each thread handles one element; blockIdx.y selects the row (batch/sequence
  * position) and threadIdx.x + blockIdx.x*blockDim.x selects the feature column.
@@ -38,11 +38,12 @@ template <typename DType = float> __global__ void geluForward(
     int flatIdx = blockIdx.y * inputDim + featureIdx;
 
     if (featureIdx < inputDim && blockIdx.y < totalBatchSize) {
-        double x = (double)input[flatIdx];
+        using CT = ComputeType<DType>;
+        CT x = (CT)input[flatIdx];
 
-        // GELU approximation using double precision: x * Φ(x)
+        // GELU approximation: x * Φ(x)
         // Using: 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-        double cdf_approx = 0.5 * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
+        CT cdf_approx = (CT)0.5 * ((CT)1 + tanh((CT)0.7978845608 * (x + (CT)0.044715 * x * x * x)));
 
         output[flatIdx] = (DType)(x * cdf_approx);
     }
@@ -86,28 +87,19 @@ template <typename DType = float> __global__ void geluBackward(
     int flatIdx = blockIdx.y * inputDim + featureIdx;
 
     if (featureIdx < inputDim && blockIdx.y < totalBatchSize) {
-        double x = (double)input[flatIdx];
-        double grad_out = (double)gradOutput[flatIdx];
+        using CT = ComputeType<DType>;
+        CT x        = (CT)input[flatIdx];
+        CT grad_out = (CT)gradOutput[flatIdx];
 
-        // Compute CDF approximation using double precision: Φ(x) ≈ 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-        double coeff = 0.7978845608; // sqrt(2/π)
-        double x_cubed = x * x * x;
-        double cdf_arg = coeff * (x + 0.044715 * x_cubed);
-        double cdf_approx = 0.5 * (1.0 + tanh(cdf_arg));
-
-        // Compute tanh derivative: d/dx[tanh(u)] = (1 - tanh(u)^2) * du/dx
-        double tanh_val = tanh(cdf_arg);
-        double tanh_deriv = (1.0 - tanh_val * tanh_val);
-
-        // du/dx where u = sqrt(2/π) * (x + 0.044715 * x^3)
-        double du_dx = coeff * (1.0 + 3.0 * 0.044715 * x * x);
-
-        // Compute PDF derivative: φ(x) ≈ (1/sqrt(2π)) * exp(-x^2/2) * d/dx[Φ(x)]
-        // More efficient: φ(x) is the derivative of the CDF approximation
-        double cdf_deriv = 0.5 * tanh_deriv * du_dx;
-
-        // Full gradient: [Φ(x) + x * φ(x)] * grad_out
-        double gelu_grad = cdf_approx + x * cdf_deriv;
+        CT coeff    = (CT)0.7978845608;  // sqrt(2/π)
+        CT x_cubed  = x * x * x;
+        CT cdf_arg  = coeff * (x + (CT)0.044715 * x_cubed);
+        CT cdf_approx  = (CT)0.5 * ((CT)1 + tanh(cdf_arg));
+        CT tanh_val    = tanh(cdf_arg);
+        CT tanh_deriv  = (CT)1 - tanh_val * tanh_val;
+        CT du_dx       = coeff * ((CT)1 + (CT)3 * (CT)0.044715 * x * x);
+        CT cdf_deriv   = (CT)0.5 * tanh_deriv * du_dx;
+        CT gelu_grad   = cdf_approx + x * cdf_deriv;
 
         gradInput[flatIdx] += (DType)(grad_out * gelu_grad);
     }

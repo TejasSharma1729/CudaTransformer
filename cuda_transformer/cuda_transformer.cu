@@ -1,5 +1,6 @@
 #include "NanoGPT.cu"
 #include "SGDOptimizer.cu"
+#include "AdamOptimizer.cu"
 // Above includes auto-include everything; this is the final compilation unit.
 
 namespace py = pybind11;
@@ -42,7 +43,7 @@ void declare_tensor(py::module &m, const std::string &type_suffix) {
             "Returns the scalar value of a single-element tensor.")
         .def("fill", &Tensor<DType>::fill, py::arg("value"),
             "Fills every element of the tensor in-place with the given scalar value.")
-        .def("reshape", &Tensor<DType>::reshape, py::arg("shape"),
+        .def("reshape", (Tensor<DType> (Tensor<DType>::*)(const std::vector<size_t>&) const) &Tensor<DType>::reshape, py::arg("shape"),
             "Returns a view of the tensor with a new shape. Total element count must be unchanged.")
         .def("transpose", [](const Tensor<DType> &t, const std::vector<size_t> &perm) { return t.transpose(perm); },
             py::arg("perm"),
@@ -236,6 +237,21 @@ void declare_modules(py::module &m, const std::string &type_suffix) {
             "Shorthand for forward(input).");
 
     // ------------------------------------------------------------------
+    // CheckpointLayer — gradient checkpointing layer.
+    // ------------------------------------------------------------------
+    py::class_<CheckpointLayer<DType>, Layer<DType>, std::shared_ptr<CheckpointLayer<DType>>>(
+            m, (type_suffix + "CheckpointLayer").c_str(),
+            "Gradient Checkpointing Layer. Stored forward activations during backward pass to save time.")
+        .def("forward", &CheckpointLayer<DType>::forward, py::arg("input"),
+            "Runs the Checkpointed forward pass.")
+        .def("backward", &CheckpointLayer<DType>::backward, py::arg("input"), py::arg("grad_output"),
+            "Runs the Checkpointed backward pass.")
+        .def("__call__", &CheckpointLayer<DType>::operator(), py::arg("input"),
+            "Shorthand for forward(input).")
+        .def("clear", &CheckpointLayer<DType>::clear,
+            "Clears any stored checkpoint activations to free up memory. Does not modify parameters or gradients.");
+
+    // ------------------------------------------------------------------
     // AttentionLayer — multi-head attention with QKV + output projection.
     // ------------------------------------------------------------------
     py::class_<AttentionLayer<DType>, Layer<DType>, std::shared_ptr<AttentionLayer<DType>>>(
@@ -308,20 +324,85 @@ void declare_modules(py::module &m, const std::string &type_suffix) {
             "Shorthand for forward(input).");
 
     // ------------------------------------------------------------------
-    // SGDOptimizer — explicit map-based optimizer (alternative to layer.sgdUpdate).
+    // MLPLayer -- sequential container of sub-layers (e.g. Linear -> Activation -> Linear).
+    // ------------------------------------------------------------------
+    py::class_<MLPLayer<DType>, Layer<DType>, std::shared_ptr<MLPLayer<DType>>>(
+            m, (type_suffix + "MLPLayer").c_str(),
+            "Sequential container for a list of sub-layers.")
+        .def("forward", &MLPLayer<DType>::forward, py::arg("input"),
+            "Runs the sequential forward pass.")
+        .def("backward", &MLPLayer<DType>::backward, py::arg("input"), py::arg("grad_output"),
+            "Runs the sequential backward pass.")
+        .def("__call__", &MLPLayer<DType>::operator(), py::arg("input"),
+            "Shorthand for forward(input).")
+        .def("clear", &MLPLayer<DType>::clear,
+            "Remove all checkpoint activations, if present. Does not modify parameters or gradients.");
+
+    // ------------------------------------------------------------------
+    // TransformerBlockLayer — single Transformer block: LayerNorm -> Attention -> LayerNorm -> MLP.
+    // ------------------------------------------------------------------
+    py::class_<TransformerBlockLayer<DType>, Layer<DType>, std::shared_ptr<TransformerBlockLayer<DType>>>(
+            m, (type_suffix + "TransformerBlockLayer").c_str(),
+            "TransformerBlock layer: LayerNorm -> Attention -> LayerNorm -> MLP.")
+        .def("forward", &TransformerBlockLayer<DType>::forward, py::arg("input"),
+            "Runs the Transformer Block forward pass.")
+        .def("backward", &TransformerBlockLayer<DType>::backward, py::arg("input"), py::arg("grad_output"),
+            "Runs the Transformer Block backward pass.")
+        .def("__call__", &TransformerBlockLayer<DType>::operator(), py::arg("input"),
+            "Shorthand for forward(input).");
+
+    // ------------------------------------------------------------------
+    // TransformerLayer — stack of multiple Transformer blocks with optional checkpointing.
+    // ------------------------------------------------------------------
+    py::class_<TransformerLayer<DType>, Layer<DType>, std::shared_ptr<TransformerLayer<DType>>>(
+            m, (type_suffix + "TransformerLayer").c_str(),
+            "Transformer layer containing multiple Transformer blocks.")
+        .def("forward", &TransformerLayer<DType>::forward, py::arg("input"),
+            "Runs the multi-block Transformer forward pass.")
+        .def("backward", &TransformerLayer<DType>::backward, py::arg("input"), py::arg("grad_output"),
+            "Runs the multi-block Transformer backward pass.")
+        .def("__call__", &TransformerLayer<DType>::operator(), py::arg("input"),
+            "Shorthand for forward(input).")
+        .def("clear", &TransformerLayer<DType>::clear,
+            "Remove all checkpoint activations, if present. Does not modify parameters or gradients.");
+
+    // ------------------------------------------------------------------
+    // State-based optimizers (SGD, Adam, AdamW).
     // ------------------------------------------------------------------
     py::class_<SGDOptimizer<DType>>(m, (type_suffix + "SGDOptimizer").c_str(),
-        "Explicit SGD optimizer that operates on parameter/gradient pointer maps.\n"
-        "Useful with LinearLayer.getParameters() / getGradients().\n"
-        "For whole-layer-tree updates, prefer layer.sgdUpdate(lr) instead.")
-        .def(py::init<DType>(), py::arg("lr"),
-            "Constructs an SGDOptimizer with the given learning rate.")
-        .def("step", &SGDOptimizer<DType>::step,
-            py::arg("params"), py::arg("grads"),
+        "Explicit SGD optimizer that operates on parameter/gradient pointer maps.")
+        .def(py::init<std::map<std::string, Tensor<DType>>, DType>(), 
+            py::arg("params"), py::arg("lr"),
+            "Constructs an SGDOptimizer with the given parameters and learning rate.")
+        .def("step", &SGDOptimizer<DType>::step, py::arg("grads"),
             "Applies one SGD step: for each matching key, params[k] -= lr * grads[k].")
         .def("setLearningRate", &SGDOptimizer<DType>::setLearningRate, py::arg("lr"),
             "Updates the learning rate.")
         .def("getLearningRate", &SGDOptimizer<DType>::getLearningRate,
+            "Returns the current learning rate.");
+
+    py::class_<AdamOptimizer<DType>>(m, (type_suffix + "AdamOptimizer").c_str(),
+        "Explicit Adam optimizer that operates on parameter/gradient pointer maps.")
+        .def(py::init<std::map<std::string, Tensor<DType>>, double, double, double, double, double>(), 
+            py::arg("params"), py::arg("lr") = 0.001, py::arg("b1") = 0.9, py::arg("b2") = 0.999, py::arg("eps") = 1e-8, py::arg("decay") = 0.0,
+            "Constructs an Adam optimizer with the given parameters and hyperparameters.")
+        .def("step", &AdamOptimizer<DType>::step, py::arg("grads"),
+            "Applies one Adam step to all parameters using the provided gradients map.")
+        .def("setLearningRate", &AdamOptimizer<DType>::setLearningRate, py::arg("lr"),
+            "Updates the learning rate.")
+        .def("getLearningRate", &AdamOptimizer<DType>::getLearningRate,
+            "Returns the current learning rate.");
+
+    py::class_<AdamWOptimizer<DType>>(m, (type_suffix + "AdamWOptimizer").c_str(),
+        "Explicit AdamW optimizer that operates on parameter/gradient pointer maps.")
+        .def(py::init<std::map<std::string, Tensor<DType>>, double, double, double, double, double>(), 
+            py::arg("params"), py::arg("lr") = 0.001, py::arg("b1") = 0.9, py::arg("b2") = 0.999, py::arg("eps") = 1e-8, py::arg("decay") = 0.0,
+            "Constructs an AdamW optimizer with the given parameters and hyperparameters.")
+        .def("step", &AdamWOptimizer<DType>::step, py::arg("grads"),
+            "Applies one AdamW step to all parameters using the provided gradients map.")
+        .def("setLearningRate", &AdamWOptimizer<DType>::setLearningRate, py::arg("lr"),
+            "Updates the learning rate.")
+        .def("getLearningRate", &AdamWOptimizer<DType>::getLearningRate,
             "Returns the current learning rate.");
 
     // ------------------------------------------------------------------
@@ -336,6 +417,20 @@ void declare_modules(py::module &m, const std::string &type_suffix) {
     m.def(("Activation" + type_suffix).c_str(),       &Activation<DType>,
         py::arg("input_dim"), py::arg("activation_type"),
         "Creates an ActivationLayer with the given ActivationType (ReLU, GELU, Sigmoid, Tanh).");
+    m.def(("Sigmoid" + type_suffix).c_str(),          &SigmoidActivation<DType>,
+        py::arg("input_dim"),
+        "Creates a Sigmoid activation layer.");
+    m.def(("Tanh" + type_suffix).c_str(),             &TanhActivation<DType>,
+        py::arg("input_dim"),
+        "Creates a Tanh activation layer.");
+    m.def(("ReLU" + type_suffix).c_str(),             &ReLUActivation<DType>,
+        py::arg("input_dim"),
+        "Creates a ReLU activation layer.");
+    m.def(("GELU" + type_suffix).c_str(),            &GELUActivation<DType>,
+        py::arg("input_dim"),
+        "Creates a GELU activation layer.");
+    m.def(("Checkpoint" + type_suffix).c_str(),        &Checkpoint<DType>,
+        "Layer for gradient checkpointing (storing activations), does nothing.");
     m.def(("MLP" + type_suffix).c_str(),              &MLP<DType>,
         py::arg("layers"),
         "Creates an MLPLayer from a list of sub-modules executed sequentially.");
@@ -534,21 +629,6 @@ void declare_nanogpt(py::module &m, const std::string &type_suffix) {
              "Computes the Jacobian-vector product dL/dx = softmax(x) * (dL/dy - dot(softmax(x), dL/dy)).");
 
     // ------------------------------------------------------------------
-    // SamplingMode enum.
-    // ------------------------------------------------------------------
-    py::enum_<SamplingMode>(m, "SamplingMode",
-        "Token sampling strategy used by NanoGPT.predict / sample / generate.")
-        .value("Greedy",  SamplingMode::Greedy,
-            "Always picks the highest-probability token (argmax).")
-        .value("Random",  SamplingMode::Random,
-            "Samples a token according to the full probability distribution.")
-        .value("Nucleus", SamplingMode::Nucleus,
-            "Nucleus (top-p) sampling: retains only tokens with probability > P, then samples.")
-        .value("TopK",    SamplingMode::TopK,
-            "Top-K sampling: retains the K highest-probability tokens, then samples.")
-        .export_values();
-
-    // ------------------------------------------------------------------
     // NanoGPT — full autoregressive language model.
     // ------------------------------------------------------------------
     py::class_<NanoGPT<DType, IdType>>(m, (type_suffix + "NanoGPT").c_str(),
@@ -651,16 +731,6 @@ void declare_nanogpt(py::module &m, const std::string &type_suffix) {
             (std::vector<IdType> (NanoGPT<DType, IdType>::*)(std::vector<IdType>, int, SamplingMode, int, double)) &NanoGPT<DType, IdType>::generate,
             py::arg("input"), py::arg("num_tokens"), py::arg("mode"), py::arg("K") = 10, py::arg("P") = 0.1,
             "Autoregressively appends `num_tokens` tokens to a Python list and returns the full sequence.")
-        // Training
-        .def("train",
-            (void (NanoGPT<DType, IdType>::*)(std::vector<IdType>, int, int, DType)) &NanoGPT<DType, IdType>::train,
-            py::arg("input"), py::arg("batch_size"), py::arg("num_epochs"), py::arg("learning_rate"),
-            "Runs a full training loop over a flat token-ID list, printing loss each epoch.\n"
-            "Randomly samples contiguous segments of length max_seq_len for each batch.")
-        .def("train",
-            (void (NanoGPT<DType, IdType>::*)(pybind11::array_t<IdType>, int, int, DType)) &NanoGPT<DType, IdType>::train,
-            py::arg("input"), py::arg("batch_size"), py::arg("num_epochs"), py::arg("learning_rate"),
-            "Runs a full training loop over a 1-D NumPy token-ID array, printing loss each epoch.")
         .def("loss", &NanoGPT<DType, IdType>::loss,
             py::arg("logits"), py::arg("target"),
             "Computes cross-entropy loss given logits [batchSize, seqLen, vocabSize] and targets [batchSize, seqLen].")
@@ -682,7 +752,9 @@ void declare_nanogpt(py::module &m, const std::string &type_suffix) {
             "Key format must match getParameters() output.")
         .def("getGradients", &NanoGPT<DType, IdType>::getGradients,
             "Returns a dict mapping parameter names to their accumulated gradient Tensors.\n"
-            "Gradient buffers are lazily allocated; call backward() first for meaningful values.");
+            "Gradient buffers are lazily allocated; call backward() first for meaningful values.")
+        .def("clear", &NanoGPT<DType, IdType>::clear,
+            "Clears all stored checkpoint activations in the model to free up memory.");
 }
 
 PYBIND11_MODULE(cuda_transformer, m) {
@@ -722,13 +794,31 @@ PYBIND11_MODULE(cuda_transformer, m) {
         .value("Tanh",    ActivationType::Tanh,    "Hyperbolic tangent: tanh(x).")
         .export_values();
 
+    // Sampling mode enum.
+    py::enum_<SamplingMode>(m, "SamplingMode",
+        "Token sampling strategy used by NanoGPT.predict / sample / generate.")
+        .value("Greedy",  SamplingMode::Greedy,
+            "Always picks the highest-probability token (argmax).")
+        .value("Random",  SamplingMode::Random,
+            "Samples a token according to the full probability distribution.")
+        .value("Nucleus", SamplingMode::Nucleus,
+            "Nucleus (top-p) sampling: retains only tokens with probability > P, then samples.")
+        .value("TopK",    SamplingMode::TopK,
+            "Top-K sampling: retains the K highest-probability tokens, then samples.")
+        .export_values();
+
     // Default float factory functions (no suffix — most convenient for interactive use).
+    m.def("LayerNorm",        &LayerNorm<float>,
+        py::arg("input_dim"), py::arg("epsilon") = 1e-5,
+        "Creates a float LayerNormLayer with the given input dimension and epsilon for numerical stability.");
     m.def("Linear",           &Linear<float>,
         py::arg("input_dim"), py::arg("output_dim"),
         "Creates a float LinearLayer.");
     m.def("Activation",       &Activation<float>,
         py::arg("input_dim"), py::arg("activation_type"),
         "Creates a float ActivationLayer (ReLU, GELU, Sigmoid, or Tanh).");
+    m.def("Checkpoint",        &Checkpoint<float>,
+        "Layer for gradient checkpointing (storing activations), does nothing.");
     m.def("MLP",              &MLP<float>,
         py::arg("layers"),
         "Creates a float MLPLayer from a list of sub-modules.");

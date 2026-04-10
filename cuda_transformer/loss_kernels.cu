@@ -31,35 +31,32 @@ template <typename DType = float> __global__ void softmaxKernel(
     DType* output,
     int embeddingDim,
     int totalBatchSize,
-    DType temperature = (DType)1.0,
+    double temperature = 1.0,
     bool logSoftmax = false
 ) {
     int batchIdx = blockIdx.x * blockDim.x + threadIdx.x; // one thread per feature
     if (batchIdx >= totalBatchSize) {
         return;
     }
-    DType maxVal;
-    if constexpr (std::is_same_v<DType, half>) {
-        maxVal = -1e4;
-    } else if constexpr (std::is_same_v<DType, double>) {
-        maxVal = -1e10;
-    }
+    using CT = ComputeType<DType>;
+    // -1e30 becomes -inf for half (fine as a starting max) and a valid large-neg for float/double
+    CT maxVal = (CT)-1e30;
     for (int i = 0; i < embeddingDim; i++) {
-        DType val = input[batchIdx * embeddingDim + i];
+        CT val = (CT)input[batchIdx * embeddingDim + i];
         if (val > maxVal) maxVal = val;
     }
-    DType sumExp = 0;
+    CT sumExp = (CT)0;
     for (int i = 0; i < embeddingDim; i++) {
-        DType expVal = (DType)exp((double)((input[batchIdx * embeddingDim + i] - maxVal) / temperature));
+        CT expVal = exp(((CT)input[batchIdx * embeddingDim + i] - maxVal) / (CT)temperature);
         sumExp += expVal;
     }
 
     for (int i = 0; i < embeddingDim; i++) {
-        DType expVal = (DType)exp((double)((input[batchIdx * embeddingDim + i] - maxVal) / temperature));
+        CT expVal = exp(((CT)input[batchIdx * embeddingDim + i] - maxVal) / (CT)temperature);
         if (logSoftmax) {
-            output[batchIdx * embeddingDim + i] = input[batchIdx * embeddingDim + i] - maxVal - (DType)log((double)sumExp);
+            output[batchIdx * embeddingDim + i] = (DType)((CT)input[batchIdx * embeddingDim + i] - maxVal - log(sumExp));
         } else {
-            output[batchIdx * embeddingDim + i] = expVal / sumExp;
+            output[batchIdx * embeddingDim + i] = (DType)(expVal / sumExp);
         }
     }
 }
@@ -93,50 +90,43 @@ template <typename DType = float> __global__ void softmaxBackwardKernel(
     DType* gradInput,
     int embeddingDim,
     int totalBatchSize,
-    DType temperature = (DType)1.0,
+    double temperature = 1.0,
     bool logSoftmax = false
 ) {
     int batchIdx = blockIdx.x * blockDim.x + threadIdx.x; // one thread per feature
     if (batchIdx >= totalBatchSize) {
         return;
     }
-    DType maxVal;
-    if constexpr (std::is_same_v<DType, half>) {
-        maxVal = -1e4;
-    } else if constexpr (std::is_same_v<DType, double>) {
-        maxVal = -1e10;
-    }
+    using CT = ComputeType<DType>;
+    CT maxVal = (CT)-1e30;
     for (int i = 0; i < embeddingDim; i++) {
-        DType val = input[batchIdx * embeddingDim + i];
+        CT val = (CT)input[batchIdx * embeddingDim + i];
         if (val > maxVal) maxVal = val;
     }
-    DType sumExp = 0;
+    CT sumExp = (CT)0;
     for (int i = 0; i < embeddingDim; i++) {
-        DType expVal = (DType)exp((double)((input[batchIdx * embeddingDim + i] - maxVal) / temperature));
-        sumExp += expVal;
+        sumExp += exp(((CT)input[batchIdx * embeddingDim + i] - maxVal) / (CT)temperature);
     }
 
-    DType sumGrad = 0;
+    CT sumGrad = (CT)0;
     for (int i = 0; i < embeddingDim; i++) {
         if (logSoftmax) {
-            sumGrad += gradOutput[batchIdx * embeddingDim + i];
+            sumGrad += (CT)gradOutput[batchIdx * embeddingDim + i];
         } else {
-            DType expVal = (DType)exp((double)((input[batchIdx * embeddingDim + i] - maxVal) / temperature));
-            DType softmaxVal = expVal / sumExp;
-            sumGrad += softmaxVal * gradOutput[batchIdx * embeddingDim + i];
+            CT softmaxVal = exp(((CT)input[batchIdx * embeddingDim + i] - maxVal) / (CT)temperature) / sumExp;
+            sumGrad += softmaxVal * (CT)gradOutput[batchIdx * embeddingDim + i];
         }
     }
 
     for (int i = 0; i < embeddingDim; i++) {
-        DType expVal = (DType)exp((double)((input[batchIdx * embeddingDim + i] - maxVal) / temperature));
-        DType softmaxVal = expVal / sumExp;
-        DType gradOut;
+        CT softmaxVal = exp(((CT)input[batchIdx * embeddingDim + i] - maxVal) / (CT)temperature) / sumExp;
+        CT gradOut;
         if (logSoftmax) {
-            gradOut = gradOutput[batchIdx * embeddingDim + i] - softmaxVal * sumGrad;
+            gradOut = (CT)gradOutput[batchIdx * embeddingDim + i] - softmaxVal * sumGrad;
         } else {
-            gradOut = softmaxVal * (gradOutput[batchIdx * embeddingDim + i] - sumGrad);
+            gradOut = softmaxVal * ((CT)gradOutput[batchIdx * embeddingDim + i] - sumGrad);
         }
-        gradInput[batchIdx * embeddingDim + i] = gradOut / temperature;
+        gradInput[batchIdx * embeddingDim + i] = (DType)(gradOut / (CT)temperature);
     }
 }
 
@@ -174,8 +164,8 @@ template <typename DType = float, typename IdType = int> __global__ void crossEn
         return;
     }
     int fullIdx = batchIdx * embeddingDim + targetId;
-    double prob = (double)input[fullIdx];
-    lossOutput[batchIdx] = (DType)(-log((double)prob));
+    ComputeType<DType> prob = (ComputeType<DType>)input[fullIdx];
+    lossOutput[batchIdx] = (DType)(-log(prob) / (ComputeType<DType>)totalBatchSize);
 }
 
 /**
@@ -214,11 +204,11 @@ template <typename DType = float, typename IdType = int> __global__ void crossEn
         return;
     }
     int fullIdx = batchIdx * embeddingDim + targetId;
-    double prob = (double)input[fullIdx];
+    ComputeType<DType> prob = (ComputeType<DType>)input[fullIdx];
     for (int i = 0; i < targetId; i++) {
         gradInput[batchIdx * embeddingDim + i] = (DType)0;
     }
-    gradInput[fullIdx] = (DType)(-1.0 / prob);
+    gradInput[fullIdx] = (DType)(-(ComputeType<DType>)1 / (prob * (ComputeType<DType>)totalBatchSize));
     for (int i = targetId + 1; i < embeddingDim; i++) {
         gradInput[batchIdx * embeddingDim + i] = (DType)0;
     }
@@ -251,19 +241,19 @@ template <typename DType = float> __global__ void mseLossKernel(
     if (batchIdx >= totalBatchSize) {
         return;
     }
-    DType sumSq = 0;
+    ComputeType<DType> sumSq = 0;
     for (int i = 0; i < embeddingDim; i++) {
         DType diff = input[batchIdx * embeddingDim + i] - target[batchIdx * embeddingDim + i];
-        sumSq += diff * diff;
+        sumSq += (ComputeType<DType>)(diff * diff);
     }
-    lossOutput[batchIdx] = sumSq / (DType)embeddingDim;
+    lossOutput[batchIdx] = (DType)(sumSq / (ComputeType<DType>)(embeddingDim * totalBatchSize));
 }
 
 /**
  * @brief Mean Squared Error (MSE) loss backward kernel: gradient w.r.t. the predicted input.
  *
  * The derivative of MSE = (1/D) * sum((input - target)^2) w.r.t. input[i] is:
- *   dL/dinput[i] = 2 * (input[i] - target[i]) * gradOutput[batch] / D
+ *   dL/dinput[i] = 2 * (input[i] - target[i]) / D
  *
  * Launch config: <<<(totalBatchSize + 255) / 256, 256>>>
  *
@@ -281,12 +271,15 @@ template <typename DType = float> __global__ void mseLossBackwardKernel(
     int embeddingDim,
     int totalBatchSize
 ) {
+    using CT = ComputeType<DType>;
     int batchIdx = blockIdx.x * blockDim.x + threadIdx.x; // one thread per feature
     if (batchIdx >= totalBatchSize) {
         return;
     }
     for (int i = 0; i < embeddingDim; i++) {
-        gradInput[batchIdx * embeddingDim + i] = (DType)(2.0 * (input[batchIdx * embeddingDim + i] - target[batchIdx * embeddingDim + i]) * gradOutput[batchIdx] / embeddingDim);
+        int fullIdx = batchIdx * embeddingDim + i;
+        CT diff = (CT)input[fullIdx] - (CT)target[fullIdx];
+        gradInput[fullIdx] = (DType)((CT)2.0 * diff / (CT)(embeddingDim * totalBatchSize));
     }
 }
 
